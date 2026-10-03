@@ -1,0 +1,83 @@
+name: codemind
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: codemind-postgres
+    environment:
+      POSTGRES_DB: codemind
+      POSTGRES_USER: codemind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codemind}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codemind -d codemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: codemind-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nacos:
+    image: nacos/nacos-server:v3.0.3
+    container_name: codemind-nacos
+    environment:
+      MODE: standalone
+      # 单机模式用内置 Derby 存储，仅开发用。
+      # 本地开发关闭鉴权：Nacos 3.x 开启鉴权需先初始化管理员密码，
+      # 不再有默认的 nacos/nacos 账号。部署到非本地环境必须改为开启。
+      # 即使关闭鉴权，启动脚本仍强制校验以下三个变量存在。
+      NACOS_AUTH_ENABLE: "false"
+      NACOS_AUTH_TOKEN: ${NACOS_AUTH_TOKEN:-U2VjcmV0S2V5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OQ==}
+      NACOS_AUTH_IDENTITY_KEY: ${NACOS_AUTH_IDENTITY_KEY:-codemind}
+      NACOS_AUTH_IDENTITY_VALUE: ${NACOS_AUTH_IDENTITY_VALUE:-codemind}
+    ports:
+      - "8848:8848"   # 客户端与控制台
+      - "9848:9848"   # gRPC
+    volumes:
+      - nacosdata:/home/nacos/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8848/nacos || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: codemind-rmq-namesrv
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.1
+    container_name: codemind-rmq-broker
+    depends_on:
+      - rocketmq-namesrv
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: sh mqbroker --enable-proxy
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+      - "18080:8080"  # Proxy，避开业务服务占用的 8080-8085
+
+volumes:
+  pgdata:
+  redisdata:
+  nacosdata:
