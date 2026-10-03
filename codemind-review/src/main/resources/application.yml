@@ -10,6 +10,27 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         username: ${NACOS_USERNAME:nacos}
         password: ${NACOS_PASSWORD:nacos}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:codemind}
+    username: ${POSTGRES_USER:codemind}
+    password: ${POSTGRES_PASSWORD:codemind}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
+  producer:
+    group: codemind-review-producer
+    send-message-timeout: 3000
+
+codemind:
+  mq:
+    topic:
+      pull-request-received: codemind-pull-request-received
+    consumer-group:
+      pull-request-received: codemind-review-pr-received
 
 management:
   endpoints:

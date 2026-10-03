@@ -26,4 +26,7 @@
 - domain 层不依赖 Spring 和任何基础设施
 - 领域事件定义放在 `codemind-common` 的 `event` 包
 - 密钥（LLM API Key、GitHub Token、Webhook Secret）只通过环境变量注入，不写入仓库
-- 测试命令：`mvn verify`（M0 落地后如有变化在此更新）
+- 测试命令：`mvn verify`，运行前必须先 `cd deploy && docker compose up -d`
+  （集成测试跑在真实 Redis / RocketMQ / PostgreSQL 上）
+- 测试分两类：`*Test` 走 surefire，纯逻辑、不依赖中间件，`mvn test` 即可跑；
+  `*IT` 走 failsafe，依赖真实中间件。新增测试按此命名归类

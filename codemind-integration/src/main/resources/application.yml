@@ -10,6 +10,27 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         username: ${NACOS_USERNAME:nacos}
         password: ${NACOS_PASSWORD:nacos}
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
+  producer:
+    group: codemind-integration-producer
+    send-message-timeout: 3000
+
+codemind:
+  webhook:
+    # 密钥只从环境变量注入，不写入仓库
+    github-secret: ${GITHUB_WEBHOOK_SECRET}
+    # Redis 幂等键 TTL（ISO-8601 Duration），过期后由 review_task 唯一索引兜底
+    idempotency-ttl: P7D
+  mq:
+    topic:
+      pull-request-received: codemind-pull-request-received
 
 management:
   endpoints:

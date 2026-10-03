@@ -71,7 +71,11 @@ services:
       - rocketmq-namesrv
     environment:
       NAMESRV_ADDR: rocketmq-namesrv:9876
-    command: sh mqbroker --enable-proxy
+    # broker.conf 里配了 brokerIP1=127.0.0.1，否则注册到 namesrv 的是容器内网 IP，
+    # 宿主机上跑的服务拿到地址后连不上。
+    command: sh mqbroker --enable-proxy -c /opt/rocketmq/conf/broker.conf
+    volumes:
+      - ./init/rocketmq/broker.conf:/opt/rocketmq/conf/broker.conf:ro
     ports:
       - "10911:10911"
       - "10909:10909"

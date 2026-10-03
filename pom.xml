@@ -34,6 +34,9 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-cloud.version>2025.0.3</spring-cloud.version>
         <spring-cloud-alibaba.version>2025.0.0.0</spring-cloud-alibaba.version>
+        <!-- SCA BOM 只管 rocketmq-client，不管 Spring Boot starter，版本在此锁定。
+             2.3.4 带 Boot 3 的 AutoConfiguration.imports。 -->
+        <rocketmq-spring.version>2.3.4</rocketmq-spring.version>
     </properties>
 
     <dependencyManagement>
@@ -53,10 +56,36 @@
                 <scope>import</scope>
             </dependency>
             <dependency>
+                <groupId>org.apache.rocketmq</groupId>
+                <artifactId>rocketmq-spring-boot-starter</artifactId>
+                <version>${rocketmq-spring.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>com.codemind</groupId>
                 <artifactId>codemind-common</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- *Test 走 surefire（无需外部依赖），*IT 走 failsafe（需要 docker compose 起的
+                     Redis / RocketMQ / PostgreSQL）。父 POM 未默认绑定 failsafe 执行，这里补上。 -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <executions>
+                        <execution>
+                            <goals>
+                                <goal>integration-test</goal>
+                                <goal>verify</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 </project>
