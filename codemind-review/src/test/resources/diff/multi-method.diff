@@ -1,0 +1,14 @@
+diff --git a/Calculator.java b/Calculator.java
+index 3333333..4444444 100644
+--- a/Calculator.java
++++ b/Calculator.java
+@@ -3,3 +3,3 @@ public class Calculator {
+     public int add(int a, int b) {
+-        return a+b;
++        return a + b;
+     }
+@@ -9,3 +9,3 @@ public class Calculator {
+     public int mul(int a, int b) {
+-        return a*b;
++        return a * b;
+     }

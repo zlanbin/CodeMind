@@ -37,6 +37,11 @@
         <!-- SCA BOM 只管 rocketmq-client，不管 Spring Boot starter，版本在此锁定。
              2.3.4 带 Boot 3 的 AutoConfiguration.imports。 -->
         <rocketmq-spring.version>2.3.4</rocketmq-spring.version>
+        <!-- M2 AST 切片 / token 估算。SCA、Boot BOM 都不管这两个，版本在此锁死。
+             （diff 解析原计划用 java-diff-utils 4.17，实测其 UnifiedDiffReader 解析真实 GitHub
+              diff 不可靠——单文件 EOF 丢 hunk、多文件静默串行——改为 domain 层自写解析器，见 PROGRESS 决策日志。） -->
+        <javaparser.version>3.28.2</javaparser.version>
+        <jtokkit.version>1.1.0</jtokkit.version>
     </properties>
 
     <dependencyManagement>
@@ -59,6 +64,16 @@
                 <groupId>org.apache.rocketmq</groupId>
                 <artifactId>rocketmq-spring-boot-starter</artifactId>
                 <version>${rocketmq-spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.javaparser</groupId>
+                <artifactId>javaparser-core</artifactId>
+                <version>${javaparser.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.knuddels</groupId>
+                <artifactId>jtokkit</artifactId>
+                <version>${jtokkit.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.codemind</groupId>

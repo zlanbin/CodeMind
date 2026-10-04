@@ -5,31 +5,81 @@
 
 ## 当前状态
 
-- 当前里程碑：M1 已完成，下一个是 M2
-- 上次更新：2026-10-03
+- 当前里程碑：M2 已完成，下一个是 M3
+- 上次更新：2026-10-04
 - 阻塞项：无
 
 ## 下一个会话要做的事
 
-开始 M2：Diff 解析、AST 语义切片、Token 估算（纯 review-service domain 层，不碰 LLM）。
+开始 M3：DAG 引擎（拓扑调度、并行、超时重试、动态扇出、checkpoint），review-service domain + infra。
 
-1. 引入 `java-diff-utils` 解析 unified diff，`JavaParser` 做 AST 切片；两个依赖的版本在根 `pom.xml` 的
-   `dependencyManagement` 里锁死（SCA / Boot BOM 都不管它们，参考 M1 加 `rocketmq-spring-boot-starter` 的做法）
-2. domain 层新增（纯 Java，不依赖 Spring）：
-   - `DiffParser`：unified diff → 变更文件 + hunk + 行号映射
-   - `SemanticChunker`：按 AST 方法边界切片，保证不截断方法
-   - `TokenEstimator`：估算每片 token 数，单片不超预算（预算值见 ARCHITECTURE.md 6.3）
-   - `ReviewChunk` 值对象，挂到 `ReviewTask` 聚合下
-3. 准备样例 diff 测试资源放 `src/test/resources/diff/`，至少覆盖：单文件单方法、单文件多方法、
-   跨文件、超大方法（单个方法就超预算的退化场景）
-4. 验证点：单测断言切片结果符合预期、无方法被截断、每片不超预算
-5. M1 遗留的建表事项：`review_task` 表和 `(repo, pr_number, head_sha)` 唯一索引已在 M1 建好
-   （`V1__create_review_task.sql`），M2 只需追加 chunk 相关表的 `V2__*.sql`
+1. domain 层新增 DAG 抽象：`Node` 接口（`execute(NodeContext)`、超时、重试策略）、拓扑排序调度器、
+   虚拟线程并行执行入度为 0 的节点、动态扇出（`PlanChunks` 节点运行时按 chunk 数产出下游子图）
+2. checkpoint：节点完成后结果写 `node_run` 表，失败后从断点续跑，已完成节点不重复调用；
+   需追加 `V3__create_node_run.sql`
+3. M2 产出的 `SemanticChunker` 会作为 `PlanChunks` 节点的核心逻辑接入：chunker 已就绪，
+   M3 只需把它包进一个 Node，并用 `ReviewTask.assignChunks(...)` 把结果挂回聚合
+4. `ReviewTaskStatus` 的 `updated_at` 到 M3 才有真正的更新路径（M1 遗留项）；状态流转
+   `CREATED → PLANNING → REVIEWING ...` 在 DAG 推进时落库
+5. 验证点（ROADMAP M3）：单测——注入节点失败，后续节点仍跑、已完成节点不重复执行；
+   并行节点总耗时≈最慢节点
 
-注意：M2 的验证点是纯单测，不需要外部中间件；但 `mvn verify` 会跑 M1 的 IT，仍需先
-`cd deploy && docker compose up -d`。
+注意：M3 若有 checkpoint 落库的 IT，需先 `cd deploy && docker compose up -d`；纯调度逻辑用 `*Test`。
+
+M2 可直接复用的东西：
+- 切片入口 `SemanticChunker.chunk(List<DiffFile>, Map<path,newSource>, ChunkBudget)`，
+  源码（new 侧）由调用方（integration 拉文件内容）提供，domain 不自己读文件
+- `ChunkBudget.ofDefault()` = 128k×30% diff 预算；`ofDiffBudget(n)` 直接给 diff 上限（测试友好）
+- `review_chunk` 表已建（V2），但**持久化接线（JdbcChunkRepository）留到 M3**，M2 没写
 
 ## 已完成里程碑
+
+### M2 Diff 解析、AST 语义切片、Token 估算 —— 完成于 2026-10-04
+
+改动范围（纯 review-service domain 层，不碰 Spring / 中间件 / LLM）：
+
+- 根 `pom.xml`：`dependencyManagement` 锁 `javaparser-core` 3.28.2、`jtokkit` 1.1.0
+  （SCA / Boot BOM 都不管这两个）。**原计划的 `java-diff-utils` 已移除**，改为自写解析器，见决策日志
+- `codemind-review` 加 `javaparser-core`、`jtokkit`（compile 作用域；均为纯计算库，无 Spring，不破坏 domain 纯度）
+- domain 新增 `com.codemind.review.domain.chunk` 包：
+  - `DiffParser`：自写 unified diff 解析器 → `List<DiffFile>`（path、`ChangeType`、`DiffHunk` 行号区间 + 原始行）
+  - `DiffFile` / `DiffHunk` / `ChangeType`：diff 值对象
+  - `TokenEstimator` 接口 + `JtokkitTokenEstimator`（jtokkit `cl100k_base` 精确计数）
+  - `ChunkBudget`：可配置总预算 + 默认 128k；`diffBudget()` = 总预算 × 30%（ARCHITECTURE 6.3）
+  - `SemanticChunker`：Java 按 AST 方法边界切（`JavaMethodIndex` + `JavaParser`），非 Java / 解析失败降级为 hunk 切片；
+    跨文件按调用关系合并（`Unit` + `DisjointSet` 并查集）；按 diff 预算贪心装箱；单 unit 超预算整片输出并标 `oversized`
+  - `ReviewChunk` 值对象（chunkId、files、changedSymbols、diffContent、tokenEstimate、oversized）
+- `ReviewTask` 聚合根加 `assignChunks(...)` / `chunks()`（只读视图），挂上切片结果
+- `db/migration/V2__create_review_chunk.sql`：`review_chunk` 表 + `(task_id, seq)` 唯一索引 + FK 到 `review_task`
+  （**只建表，JdbcChunkRepository 留 M3**）
+- 测试资源 `src/test/resources/diff/`：`single-method` / `multi-method` / `cross-file` / `oversized-method`
+  四个 diff，Java 用例配套 `src/*.java` 完整新源码
+
+验证命令与结果：
+
+| 验证点 | 命令 | 结果 |
+|---|---|---|
+| 构建 + 全部测试 | `mvn verify` | 通过，8 模块；review 25 单测 + 8 IT 全绿；全仓 IT 保持通过 |
+| 切片结果符合预期 | `SemanticChunkerTest` | 单方法→1 片且符号=`OrderService#cancel`；跨文件调用关系→合并成 1 片含 2 文件 |
+| 无方法被截断 | `SemanticChunkerTest` | 多方法预算收紧时按方法切成 2 片、各含 1 完整方法；oversized 场景方法体每行仍在片内 |
+| 每片不超预算 | `everyNonOversizedChunkStaysWithinBudget...`（真实 jtokkit） | 非 oversized 片的 tokenEstimate ≤ diffBudget |
+| 退化场景 | `oversizedMethodBecomesOneChunkFlagged...` | 单方法超小预算→1 片 `oversized=true`，不截断不丢弃 |
+| diff 解析正确性 | `DiffParserTest` | 单/多 hunk、多文件不串接、增删文件、重命名、空输入 |
+| V2 迁移 | `mvn verify`（review IT） | Flyway `Migrating schema to version "2"`；`\d review_chunk` 表 + 唯一索引 + FK + check 均在 |
+
+遗留问题 / 技术债：
+
+- `review_chunk` 表已建但无持久化接线（`JdbcChunkRepository` 未写），M3 落 checkpoint 时补
+- `SemanticChunker` 的跨文件「调用关系」用的是轻量启发式（B 的 diff 文本里出现 A 的 `方法名(` 即判相关），
+  不是真实调用图分析；足够 M2，M6 跨会话 Map-Reduce 若需更准可升级
+- `DiffParser` 只解析评审需要的部分（path / changeType / hunk 行号 / 原始行），不解析 `index` 哈希、
+  不校验 hunk 行数自洽、二进制文件（`Binary files ... differ`）跳过无 hunk
+- `JavaMethodIndex` 的方法限定名是「外层类名#方法名」，非完全限定名（不含包名 / 不处理嵌套类同名方法歧义），
+  用于分组足够；若 M5 fingerprint 需要全限定名再升级
+- surefire 3.x 下 `-Dtest='pkg.*'` 包通配不生效（会「No tests executed」），跑单包用 `mvn test` 全量或 `-Dtest=ClassName`
+
+与 ARCHITECTURE.md 的偏差：无（diff 解析改自写是实现手段，不影响架构；ARCHITECTURE 2 的技术栈表仍列
+java-diff-utils 作为「代码解析」候选，已不使用——留待下次架构复盘时清理，不属 M2 范围）
 
 ### M1 Webhook 接入 —— 完成于 2026-10-03
 
@@ -141,6 +191,12 @@
 | 2026-10-03 | M1 | Flyway 需额外加 `flyway-database-postgresql` | Flyway 11 起把 PostgreSQL 支持拆成独立 artifact，只有 `flyway-core` 会启动失败 |
 | 2026-10-03 | M1 | 幂等检查放在载荷解析之后 | 解析失败属于坏请求，不该把 deliveryId 占住导致重投被当成重放丢弃 |
 | 2026-10-03 | M1 | 控制器用 `byte[]` 接收请求体 | 验签必须对原始字节算 HMAC，反序列化再序列化会改变字节内容导致验签失败 |
+| 2026-10-04 | M2 | 移除 `java-diff-utils`，自写 unified diff 解析器 | 实测 4.17 的 `UnifiedDiffReader` 解析真实 GitHub diff 不可靠：单文件 EOF 丢最后一个 hunk（deltas=0 或抛 `expected data line not found`）、多文件 git diff 直接抛异常、无 `diff --git` 头时后一文件的 `--- ` 头被当成前一 hunk 的上下文行静默串接（files 数变少）。自写约 180 行、纯 Java、全覆盖单测，可控性和正确性都更好 |
+| 2026-10-04 | M2 | token 估算用 jtokkit `cl100k_base` 真实 BPE 分词 | 用户选真实分词器而非字符数启发式；已验证阿里云镜像可拉到 jtokkit 1.1.0；jtokkit 纯计算无 Spring 依赖，放 domain 层不破坏分层 |
+| 2026-10-04 | M2 | `SemanticChunker` 入参为 diff + 文件完整源码（new 侧），源码由调用方提供 | AST 按方法边界切需要完整文件，而 unified diff 只有 hunk + 上下文行；拉文件内容是 integration 的职责（ARCHITECTURE 3.3），domain 不自己读文件、保持纯算法 |
+| 2026-10-04 | M2 | 跨文件「调用关系」用轻量启发式（diff 文本出现 `方法名(` 即判相关） | 真实调用图分析超出 M2 范围；启发式足以满足验证点，M6 需更准再升级 |
+| 2026-10-04 | M2 | 单方法超预算时整片输出并标 `oversized`，不截断不拆方法 | 「方法不被截断」是硬不变量；超预算的降级（裁上下文→压记忆→拆 chunk，ARCHITECTURE 6.3）属下游职责，切片阶段只负责标记 |
+| 2026-10-04 | M2 | V2 只建 `review_chunk` 表，不写 JdbcChunkRepository | M2 验证点是纯 domain 单测；持久化在 M3 落 checkpoint 时才需要，提前写无处验证 |
 
 ## 环境与常用命令
 

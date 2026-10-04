@@ -1,11 +1,17 @@
 package com.codemind.review.domain.task;
 
+import com.codemind.review.domain.chunk.ReviewChunk;
+
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
 /**
- * 评审任务聚合根。M1 只有标识、来源和状态机；ChangeMap / ReviewChunk / Finding 在 M2、M3、M5 补。
+ * 评审任务聚合根。M1 有标识、来源和状态机；M2 挂上语义切片结果 {@link ReviewChunk}；
+ * ChangeMap / Finding 在 M3、M5 补。
  *
  * <p>纯 Java，不依赖 Spring 和持久化框架，映射在 infrastructure 层。
  */
@@ -18,6 +24,7 @@ public class ReviewTask {
     private final String baseSha;
     private final String sourceEventId;
     private final Instant createdAt;
+    private final List<ReviewChunk> chunks = new ArrayList<>();
 
     private ReviewTaskStatus status;
 
@@ -63,6 +70,21 @@ public class ReviewTask {
                     "非法状态流转: %s → %s (taskId=%s)".formatted(status, target, taskId));
         }
         this.status = target;
+    }
+
+    /**
+     * 挂上 PlanChunks 节点产出的语义切片（M2）。切片是规划阶段的结果，调用方负责在
+     * {@code CREATED → PLANNING} 之后设置。重复调用以最新一次为准（续跑重算场景）。
+     */
+    public void assignChunks(List<ReviewChunk> newChunks) {
+        Objects.requireNonNull(newChunks, "chunks");
+        this.chunks.clear();
+        this.chunks.addAll(newChunks);
+    }
+
+    /** 只读视图，外部不能直接改聚合内部集合。 */
+    public List<ReviewChunk> chunks() {
+        return Collections.unmodifiableList(chunks);
     }
 
     private static String requireText(String value, String field) {

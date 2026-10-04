@@ -1,0 +1,10 @@
+diff --git a/OrderService.java b/OrderService.java
+index 1111111..2222222 100644
+--- a/OrderService.java
++++ b/OrderService.java
+@@ -4,3 +4,4 @@ public class OrderService {
+     public void cancel(int id) {
+-        stock++;
++        stock = stock + 1;
++        log(id);
+     }
