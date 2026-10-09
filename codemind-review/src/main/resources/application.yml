@@ -18,6 +18,17 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+  ai:
+    openai:
+      # OpenAI 兼容协议，M4 走中转端点（模型为 Claude 系列）。API Key 只经环境变量注入，不写入仓库。
+      # 占位默认值仅为让无 Key 环境（如纯 checkpoint IT）也能加载上下文——Spring AI 对空 key 会在启动期报错；
+      # 真实 LLM 调用（ReviewAgentIT）按环境变量 CODEMIND_LLM_API_KEY 是否存在决定是否执行。
+      base-url: ${CODEMIND_LLM_BASE_URL:https://api.aiblitz.io}
+      api-key: ${CODEMIND_LLM_API_KEY:placeholder-no-key}
+      chat:
+        options:
+          model: ${CODEMIND_LLM_MODEL:claude-haiku-4-5-20251001}
+          temperature: 0.0
 
 rocketmq:
   name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
@@ -31,6 +42,8 @@ codemind:
       pull-request-received: codemind-pull-request-received
     consumer-group:
       pull-request-received: codemind-review-pr-received
+  llm:
+    max-retries: ${CODEMIND_LLM_MAX_RETRIES:2}
 
 management:
   endpoints:

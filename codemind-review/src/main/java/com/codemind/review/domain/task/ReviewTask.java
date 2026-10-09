@@ -1,6 +1,7 @@
 package com.codemind.review.domain.task;
 
 import com.codemind.review.domain.chunk.ReviewChunk;
+import com.codemind.review.domain.finding.Finding;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -11,7 +12,7 @@ import java.util.UUID;
 
 /**
  * 评审任务聚合根。M1 有标识、来源和状态机；M2 挂上语义切片结果 {@link ReviewChunk}；
- * ChangeMap / Finding 在 M3、M5 补。
+ * M5 挂上 {@link Finding} 评审结果。
  *
  * <p>纯 Java，不依赖 Spring 和持久化框架，映射在 infrastructure 层。
  */
@@ -25,6 +26,7 @@ public class ReviewTask {
     private final String sourceEventId;
     private final Instant createdAt;
     private final List<ReviewChunk> chunks = new ArrayList<>();
+    private final List<Finding> findings = new ArrayList<>();
 
     private ReviewTaskStatus status;
 
@@ -85,6 +87,21 @@ public class ReviewTask {
     /** 只读视图，外部不能直接改聚合内部集合。 */
     public List<ReviewChunk> chunks() {
         return Collections.unmodifiableList(chunks);
+    }
+
+    /**
+     * 挂上评审结果（M5）。多个 chunk 归约后的所有 Finding 汇总到任务级别。
+     * 重复调用以最新一次为准（续跑场景）。
+     */
+    public void assignFindings(List<Finding> newFindings) {
+        Objects.requireNonNull(newFindings, "findings");
+        this.findings.clear();
+        this.findings.addAll(newFindings);
+    }
+
+    /** 只读视图。 */
+    public List<Finding> findings() {
+        return Collections.unmodifiableList(findings);
     }
 
     private static String requireText(String value, String field) {

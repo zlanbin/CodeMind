@@ -62,6 +62,18 @@ public class JdbcReviewTaskRepository implements ReviewTaskRepository {
                 .optional();
     }
 
+    @Override
+    public void updateStatus(String taskId, ReviewTaskStatus status) {
+        jdbcClient.sql("""
+                update review_task
+                set status = :status, updated_at = now()
+                where task_id = :taskId
+                """)
+                .param("taskId", UUID.fromString(taskId))
+                .param("status", status.name())
+                .update();
+    }
+
     private ReviewTask mapRow(ResultSet rs, int rowNum) throws SQLException {
         return ReviewTask.rehydrate(
                 rs.getString("task_id"),

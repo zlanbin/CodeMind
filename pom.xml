@@ -42,6 +42,8 @@
               diff 不可靠——单文件 EOF 丢 hunk、多文件静默串行——改为 domain 层自写解析器，见 PROGRESS 决策日志。） -->
         <javaparser.version>3.28.2</javaparser.version>
         <jtokkit.version>1.1.0</jtokkit.version>
+        <!-- M4 LLM 接入。1.x 线与 Boot 3.5 配套（PLAN 第 5 节）；Boot BOM 不管 Spring AI，版本在此锁死。 -->
+        <spring-ai.version>1.1.8</spring-ai.version>
     </properties>
 
     <dependencyManagement>
@@ -74,6 +76,13 @@
                 <groupId>com.knuddels</groupId>
                 <artifactId>jtokkit</artifactId>
                 <version>${jtokkit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
             <dependency>
                 <groupId>com.codemind</groupId>

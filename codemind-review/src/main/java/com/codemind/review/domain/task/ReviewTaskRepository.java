@@ -15,4 +15,9 @@ public interface ReviewTaskRepository {
     boolean insertIfAbsent(ReviewTask task);
 
     Optional<ReviewTask> findByPrHead(String repo, int prNumber, String headSha);
+
+    /**
+     * 更新任务状态，同时刷新 updated_at（M3 状态流转落库）。
+     */
+    void updateStatus(String taskId, ReviewTaskStatus status);
 }

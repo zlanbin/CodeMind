@@ -5,34 +5,219 @@
 
 ## 当前状态
 
-- 当前里程碑：M2 已完成，下一个是 M3
-- 上次更新：2026-10-04
+- 当前里程碑：**M5 已完成**（验证点全绿：同一问题被多 Agent 命中只保留 1 条）；下一个会话进 M6
+- 上次更新：2026-10-09
 - 阻塞项：无
 
 ## 下一个会话要做的事
 
-开始 M3：DAG 引擎（拓扑调度、并行、超时重试、动态扇出、checkpoint），review-service domain + infra。
+**进入 M6：跨会话 Map-Reduce（ChangeMap、ChunkSummary、GlobalReduce）。**
 
-1. domain 层新增 DAG 抽象：`Node` 接口（`execute(NodeContext)`、超时、重试策略）、拓扑排序调度器、
-   虚拟线程并行执行入度为 0 的节点、动态扇出（`PlanChunks` 节点运行时按 chunk 数产出下游子图）
-2. checkpoint：节点完成后结果写 `node_run` 表，失败后从断点续跑，已完成节点不重复调用；
-   需追加 `V3__create_node_run.sql`
-3. M2 产出的 `SemanticChunker` 会作为 `PlanChunks` 节点的核心逻辑接入：chunker 已就绪，
-   M3 只需把它包进一个 Node，并用 `ReviewTask.assignChunks(...)` 把结果挂回聚合
-4. `ReviewTaskStatus` 的 `updated_at` 到 M3 才有真正的更新路径（M1 遗留项）；状态流转
-   `CREATED → PLANNING → REVIEWING ...` 在 DAG 推进时落库
-5. 验证点（ROADMAP M3）：单测——注入节点失败，后续节点仍跑、已完成节点不重复执行；
-   并行节点总耗时≈最慢节点
+验证点（ROADMAP M6）：构造超预算 PR，能发现跨文件签名不一致问题。
 
-注意：M3 若有 checkpoint 落库的 IT，需先 `cd deploy && docker compose up -d`；纯调度逻辑用 `*Test`。
+要做的事（ARCHITECTURE 6 跨会话评审设计）：
+1. 全局变更地图节点（`BuildChangeMapNode`）：只输入文件列表、方法签名变更、diff 统计 → 输出 `ChangeMap`
+   （PR 意图、模块划分、高风险文件），之后每个子会话注入它
+2. `ChunkSummary` 结构：子会话评审时，除了 Findings，还输出结构化摘要（changedSymbols、intent、risks、
+   crossChunkQuestions），由 `ReviewChunkNode` 扩展返回
+3. GlobalReduce 节点：只读所有 ChunkSummary（不读原始 diff），回答跨 chunk 问题，发现跨文件问题
+4. `ReviewTask` 挂 ChangeMap、ChunkSummary、状态流转完善（PLANNING → REVIEWING → AGGREGATING）
+5. 集成测试：构造跨文件签名不一致的多文件 diff，验证 GlobalReduce 能发现
 
-M2 可直接复用的东西：
+跑验证的前置（已验证可用）：
+```bash
+cd deploy && docker compose up -d                  # 等 PG / Redis / Nacos healthy
+export CODEMIND_LLM_API_KEY=<中转端点 Claude 分组 key>
+mvn verify
+```
+注意：`CODEMIND_LLM_API_KEY` 不设时真实 LLM IT 会 `assumeTrue` 跳过，不算验证到。
+安全提醒：key 曾两次贴进聊天记录（上一会话 + 本会话），建议轮换。
+
+**M4 代码已就绪，可直接复用的东西：**
+- 单 Agent 评审入口：`ReviewAgent.review(ReviewChunk)` → `AgentReview`（Finding 列表或降级结果）；
+  Spring 装配在 `infrastructure/llm/ReviewAgentConfig`，LLM 适配器 `SpringAiLlmClient`
+- 结构化输出解析：`FindingJsonParser.parse(String)` → `List<Finding>`（剥 markdown 围栏、严格校验、
+  非法抛 `FindingParseException`）
+- `ReviewChunkNode`：把 `ReviewAgent` 包成 DAG 节点，衔接 M3 `PlanChunksNode`（M5 多 Agent fan-out 用）
+- `Finding` 值对象 + `Fingerprints.of(file, category, snippet)`（指纹已就绪，M5 去重 / M10 增量判重直接用）
+
+M2/M3 可直接复用的东西（未变）：
 - 切片入口 `SemanticChunker.chunk(List<DiffFile>, Map<path,newSource>, ChunkBudget)`，
   源码（new 侧）由调用方（integration 拉文件内容）提供，domain 不自己读文件
 - `ChunkBudget.ofDefault()` = 128k×30% diff 预算；`ofDiffBudget(n)` 直接给 diff 上限（测试友好）
-- `review_chunk` 表已建（V2），但**持久化接线（JdbcChunkRepository）留到 M3**，M2 没写
+- DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M5 多 Agent 并行评审与 fingerprint 去重 —— 完成于 2026-10-09
+
+改动范围（review-service domain + infrastructure，扩展 M3 M4）：
+
+- domain 新增 `com.codemind.review.domain.agent.ReviewDimension`：枚举（STYLE / SECURITY / PERFORMANCE / TEST）
+- domain 修改 `ReviewAgent`：构造器增加 `ReviewDimension` 参数，`buildSystemPrompt()` 根据维度动态生成专属 prompt
+  （M4 的通用 prompt 拆成 4 个维度各自聚焦的 prompt）
+- domain 新增 `dag/ChunkReduceNode`：按 fingerprint 去重多个 Agent 对同一 chunk 的评审结果；
+  同 fingerprint 只保留 severity 最高的一条（`ChunkReduceResult` 记录去重后的 Finding + 降级信息）
+- domain 新增 `dag/DagOrchestrator`：动态扇出编排器，解决 M3 遗留的「PlanChunks → 为每个 chunk × 维度 fan-out 评审节点」；
+  执行流程：PlanChunks 产出 chunks → 每个 chunk × 4 维度 = 4N 个 ReviewChunkNode 并行 → N 个 ChunkReduceNode 归约
+- domain 修改 `DagDefinition.Builder`：新增 `addNode(Node, List<String> dependsOn)` 重载，支持声明依赖列表
+- domain 修改 `ReviewTask`：新增 `assignFindings(List<Finding>)` / `findings()` 挂上评审结果（M4 遗留）
+- domain 修改 `NodeContext`：新增 `initial(String)` 别名方法（测试友好）
+- domain 修改 `AgentReview`：工厂方法改为 `public static`（测试可见）
+- infrastructure 修改 `ReviewAgentConfig`：装配 `Map<ReviewDimension, ReviewAgent>`（4 个维度各一个 Agent）
+- 测试：
+  - `ReviewAgentTest`（5 个纯单测）：为各维度 Agent 补充测试，验证重试/降级
+  - `ChunkReduceNodeTest`（3 个纯单测）：验证同 fingerprint 去重（保留 severity 高的）、降级信息收集、上游节点未完成抛异常
+  - `DagOrchestratorTest`（2 个纯单测）：验证动态扇出 + 多 Agent 并行 + 去重（2 个 chunk × 4 维度 = 8 个并行节点）
+  - `MultiAgentIntegrationIT`（Spring Boot IT，真实 LLM key 可选）：验证真实容器 + 多 Agent 并行 + fingerprint 去重
+    （断言去重后所有 Finding 指纹互不相同）；无真实 key 时 `assumeTrue` 跳过
+  - `ReviewAgentIT`：适配 M5 的 `Map<ReviewDimension, ReviewAgent>` 注入（取 SECURITY 维度作代表）
+
+验证命令与结果：
+
+| 验证点 | 命令 | 结果 |
+|---|---|---|
+| 同一问题被多 Agent 命中只保留 1 条 | `mvn test -pl codemind-review` | **通过**。`ChunkReduceNodeTest.deduplicatesSameFingerprintAcrossAgents` 验证：4 条原始 Finding（f1+f2 同指纹）→ 去重后 3 条，保留 severity 更高的 f2；`DagOrchestratorTest.dynamicFanOutAndDedup` 验证：2 个 chunk × 4 维度并行评审 → 各归约为 2 条去重后 Finding，且保留 severity 更高者 |
+| 全仓回归 | `mvn verify`（2026-10-09 13:57） | **通过**。8 模块 BUILD SUCCESS；review 模块 **49 单测 + 15 IT** 全绿，0 失败。IT 中 2 个 skip 为真实 LLM 用例（`ReviewAgentIT` / `MultiAgentIntegrationIT`），无真实 key 时按 `assumeTrue` 跳过 |
+
+> 注：首次 `mvn verify` 曾因 `ReviewAgentIT` 仍注入已不存在的单个 `ReviewAgent` bean 而失败
+> （`ReviewAgentConfig` 改为只产出 `Map<ReviewDimension, ReviewAgent>`）。已改为注入 Map 并取
+> SECURITY 维度作代表，重跑通过。
+
+遗留问题 / 技术债：
+
+- `ReviewTask.assignFindings` 已就绪，但尚未在完整流程中调用（`DagOrchestrator.executeReview` 返回归约结果，
+  未挂回 `ReviewTask`）；状态流转 `PLANNING → REVIEWING → AGGREGATING` 也未接线（M6 完整流程时补）
+- `ChunkSummary`（子会话摘要）尚未实现，`ReviewChunkNode` 只返回 `AgentReview`（Findings + 降级信息），
+  未输出结构化摘要（M6 跨会话 Map-Reduce 时补）
+- `DagOrchestrator` 接受泛型 `Node` 而非具体 `PlanChunksNode`，测试用 stub；真实流程接线在 M6
+- `GlobalReduce` 节点（读 ChunkSummary 发现跨文件问题）留 M6
+- `BuildChangeMapNode`（全局变更地图）留 M6
+- 真实 LLM IT（`MultiAgentIntegrationIT`）因无真实 key 跳过，未实际验证真实模型的多维度输出；
+  本地可带真实 key 补跑：`export CODEMIND_LLM_API_KEY=<key> && mvn test -Dtest=MultiAgentIntegrationIT`
+
+与 ARCHITECTURE.md 的偏差：无。多 Agent 并行维度（STYLE / SECURITY / PERFORMANCE / TEST）按 ARCHITECTURE 5 落地；
+fingerprint 去重按 ARCHITECTURE 4 落地。
+
+## 已完成里程碑
+
+### M4 LLM 接入与结构化输出（单 Agent）—— 完成于 2026-10-09
+
+> 代码写于 2026-10-05；真实 LLM 验证点于 2026-10-09 补跑通过，M4 收尾。
+
+改动范围（review-service domain + infrastructure，不碰 M1~M3 行为）：
+
+- 根 `pom.xml`：`properties` 加 `spring-ai.version=1.1.8`，`dependencyManagement` import `spring-ai-bom`
+  （Boot BOM 不管 Spring AI，版本在此锁死；PLAN 第 5 节已指定 1.1.8）
+- `codemind-review` 引入 `spring-ai-starter-model-openai`（只在 infrastructure 用）
+- domain 新增 `com.codemind.review.domain.finding` 包：
+  - `Finding`：评审意见值对象（`file / line / severity / category / message / suggestion / fingerprint`，ARCHITECTURE 4）
+  - `Severity` / `Category`：枚举（LLM 输出必须落在集合内，否则判非法）
+  - `Fingerprints`：`fingerprint = hash(file + category + normalize(snippet))`（SHA-256，归一化去空白转小写）
+- domain 新增 `com.codemind.review.domain.agent` 包：
+  - `LlmClient`：LLM 调用端口（纯接口，domain 不依赖 Spring AI）；`LlmException` 调用失败
+  - `FindingJsonParser`：剥 markdown 围栏 → Jackson 严格解析 → `List<Finding>`，非法抛 `FindingParseException`
+  - `ReviewAgent`：领域服务，组 prompt → 调 `LlmClient` → 解析；**解析/调用失败重试（默认 2 次），
+    重试耗尽降级**（返回空 Findings + 降级原因，不抛异常中断 DAG）
+  - `AgentReview`：单 Agent 对一个 chunk 的结果（findings / degraded / degradeReason / attempts）
+- domain 新增 `dag/ReviewChunkNode`：把 `ReviewAgent` 对单 chunk 的评审包成 DAG 节点，衔接 M3 `PlanChunksNode`
+- infrastructure 新增 `infrastructure/llm`：
+  - `SpringAiLlmClient implements LlmClient`：Spring AI `ChatClient`，OpenAI 兼容协议
+  - `ReviewAgentConfig`：把 `FindingJsonParser` / `ReviewAgent` 装配成 Bean（domain 服务不带 Spring 注解）
+- `application.yml`：`spring.ai.openai`（base-url 默认 `https://api.aiblitz.io`、api-key 走
+  `CODEMIND_LLM_API_KEY`、model 默认 `claude-haiku-4-5-20251001`、temperature 0.0）、`codemind.llm.max-retries`
+- 测试：
+  - `FindingJsonParserTest`（纯单测，8 个）：合法 / 带围栏 / 空数组 / 非 JSON / 缺 findings / 枚举非法 /
+    缺必填字段 / 空输入
+  - `ReviewAgentTest`（纯单测，5 个，stub LlmClient）：合法一次成功、首次畸形→重试成功、
+    始终畸形→重试耗尽降级、LLM 调用异常→重试降级、maxRetries=0 立即降级
+  - `ReviewAgentIT`（真实 LLM）：样例 diff → 真实中转端点 → 断言输出可解析为合法 Finding JSON；
+    无真实 key 时 `assumeTrue` 跳过
+
+验证命令与结果：
+
+| 验证点 | 命令 | 结果 |
+|---|---|---|
+| 非法输出触发重试/降级 | `mvn -pl codemind-review test`（surefire） | **通过**。`ReviewAgentTest` 5 个 + `FindingJsonParserTest` 8 个全绿；review 模块 44 个单测全通过 |
+| 样例 diff 输出合法 Finding JSON | `mvn verify`（真实 LLM key + 中间件，2026-10-09） | **通过**。`ReviewAgentIT.realLlmProducesLegalFindingJson` 实跑 11.76s（真实网络调用，未被 `assumeTrue` 跳过）：真实 LLM 返回 **4 条 Finding，attempts=1**（首次即解析成功，`degraded()==false`）；每条 Finding 的 file / severity / category / fingerprint 均非空合法 |
+| 全仓回归 | `mvn verify`（2026-10-09） | **通过**。8 模块 BUILD SUCCESS；66 单测 + 21 IT 全绿，0 失败 0 跳过 |
+| 中转端点连通性（只读自测，非 IT） | `curl /v1/models`、`/v1/chat/completions` | 端点正常，`claude-haiku-4-5-20251001` 返回合法 OpenAI 格式 JSON |
+
+本会话（2026-10-09）另修一处 M3 遗留测试缺陷：
+
+- `ChunkRepositoryIT` 两个用例原先硬编码 `"owner/repo"` 且无清理逻辑，`review_task` 残留数据会让
+  `insertIfAbsent` 被唯一索引拦掉（返回 false 但测试未断言），后续插 `review_chunk` 撞外键
+  `review_chunk_task_id_fkey` 报 `DataIntegrityViolationException`。改为对齐
+  `ReviewTaskRepositoryIT` 的做法：每轮用独立 repo 名（`codemind/chunk-it-<UUID>`）+ `@AfterEach`
+  先删 chunk 再删 task，并关掉 Nacos discovery。修复后 2 个用例稳定通过
+
+遗留问题 / 技术债：
+
+- `application.yml` 的 `api-key` 给了占位默认值 `placeholder-no-key`：Spring AI 对空 key 会在**启动期**
+  报错（会拖垮现有不需要 LLM 的 IT 如 `ReviewApplicationIT` / 各 RepositoryIT 的上下文加载），
+  故给非空占位；真实调用由 `ReviewAgentIT` 按环境变量是否为真实 key 决定是否执行
+- `ReviewChunkNode` 已能跑单 chunk，但「PlanChunks 产出 chunks → 为每个 chunk fan-out 评审节点」的
+  动态扇出接线仍未做（M3 遗留 + M5 多 Agent 一起补）；`ReviewTask` 挂 Finding、状态流转到
+  `REVIEWING / AGGREGATING` 也未接
+- `ReviewAgent` 的 prompt 是单维度通用评审，未按 Style/Security/Perf/Test 分维度（ARCHITECTURE 5 的
+  并行维度在 M5 做）；未注入 ChangeMap / 规则 / 记忆（M6 跨会话、M8 记忆时补）
+- 重试退避：`ReviewAgent` 当前无退避 sleep（纯内存重试，立即重试）；真实 LLM 限流场景可能需要退避，
+  观察 IT 实跑后再定
+- Spring AI 的 token 用量 / 成本未采集（M12 可观测时接 Micrometer）
+
+与 ARCHITECTURE.md 的偏差：无。技术栈表已列 Spring AI 1.1.8「M4 引入」，本次按此落地；
+`LlmClient` 端口在 domain、Spring AI 适配器在 infrastructure，符合 ARCHITECTURE 3.2 分层。
+
+### M3 DAG 引擎（拓扑调度、并行、超时重试、checkpoint）—— 完成于 2026-10-04
+
+改动范围（review-service domain + infrastructure）：
+
+- domain 新增 `com.codemind.review.domain.dag` 包：
+  - `Node` 接口：`execute(NodeContext)`，可配置超时、重试策略
+  - `NodeContext`：节点执行上下文（任务标识、已完成节点结果、共享状态）
+  - `DagDefinition`：DAG 拓扑定义（节点 + 依赖关系），代码构建（builder 模式），构建时检测循环依赖
+  - `DagScheduler`：拓扑调度器，虚拟线程并行执行入度为 0 的节点，checkpoint 续跑，已完成节点不重复执行
+  - `NodeRun` / `NodeRunRepository`：节点运行记录（checkpoint 持久化）
+  - `PlanChunksNode`：M2 `SemanticChunker` 包装成 Node（暂未接入完整 DAG 流程，M4 用）
+- infrastructure：
+  - `JdbcNodeRunRepository`：节点运行记录 JDBC 实现，结果序列化为 JSON
+  - `JdbcChunkRepository`：语义切片 JDBC 实现（M2 建表，M3 补接线）
+  - `JdbcReviewTaskRepository.updateStatus`：状态更新方法，同时刷新 `updated_at`
+- domain 端口新增：
+  - `ChunkRepository`：语义切片仓储接口
+  - `ReviewTaskRepository.updateStatus`：状态更新方法
+- `db/migration/V3__create_node_run.sql`：`node_run` 表 + `uk_node_run_task_node` 唯一索引 + `idx_node_run_task_status` 索引
+- 测试：
+  - `DagSchedulerTest`（纯单测）：线性 DAG 按序执行、并行节点总耗时 ≈ 最慢节点、失败节点重试、checkpoint 跳过已完成节点、循环依赖拒绝
+  - `NodeRunRepositoryIT`：checkpoint 落库、状态更新、按任务查询已完成节点
+  - `ChunkRepositoryIT`：切片落库、续跑时替换旧切片
+
+验证命令与结果：
+
+| 验证点 | 命令 | 结果 |
+|---|---|---|
+| 构建 + 全部测试 | `mvn verify` | 通过，8 模块；review 37 单测 + 13 IT 全绿；全仓 66 测试全通过 |
+| 并行节点总耗时 ≈ 最慢节点 | `DagSchedulerTest.parallelNodesExecuteConcurrently` | B 和 C 各 sleep 100ms 并行，总耗时 < 180ms（非 200ms） |
+| 已完成节点不重复执行 | `DagSchedulerTest.checkpointSkipsCompletedNodes` | A 完成后重新调度 A→B→C，只执行 B 和 C（execCount=2） |
+| 失败节点重试 | `DagSchedulerTest.failedNodeRetriesAndEventuallyFails` | 初次 + 2 次重试，共 3 次执行 |
+| Checkpoint 落库 | `NodeRunRepositoryIT` | 运行中 / 已完成 / 失败状态正确落库；按任务查询已完成节点 |
+| 切片持久化 | `ChunkRepositoryIT` | 切片 JSON 字段正确序列化；续跑时旧切片被清空并替换 |
+| V3 迁移 | `mvn verify` | Flyway `Migrating schema to version "3"`；`node_run` 表 + 唯一索引 + 普通索引均在 |
+
+遗留问题 / 技术债：
+
+- 动态扇出（`PlanChunks` 节点运行时按 chunk 数产出下游子图）暂未实现，M5 跨会话 Map-Reduce 时补
+- `PlanChunksNode` 只做了切片落库，未接入完整 DAG 流程（如挂回聚合、状态流转），M4 接入 LLM 时完善
+- `NodeRunRepository` 的结果序列化用 `ObjectMapper.readValue(..., Object.class)`，反序列化后需调用方手动转型；
+  若结果类型复杂（如嵌套对象、泛型集合），需改用 `TypeReference` 或单独存类型元信息
+- 虚拟线程池用 `Executors.newVirtualThreadPerTaskExecutor()`（每次并行创建新池并 shutdown），
+  未复用线程池；高频调度场景可改为共享池（但需注意生命周期管理）
+- `DagScheduler` 的超时机制是单节点超时（`Future.get(timeout)`），不是整个 DAG 超时；
+  若需全局超时，需在调度器外包一层 `Future.get`
+- 测试中清空数据用 `truncate review_chunk, review_task cascade`，IT 间可能有残留数据干扰；
+  理想是每个 IT 用独立 schema 或事务回滚（`@Transactional` + `@Rollback`），但当前未配置
+
+与 ARCHITECTURE.md 的偏差：无（动态扇出标注为 M5 实现，M3 只做基础调度，符合预期）
 
 ### M2 Diff 解析、AST 语义切片、Token 估算 —— 完成于 2026-10-04
 
@@ -197,6 +382,17 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-04 | M2 | 跨文件「调用关系」用轻量启发式（diff 文本出现 `方法名(` 即判相关） | 真实调用图分析超出 M2 范围；启发式足以满足验证点，M6 需更准再升级 |
 | 2026-10-04 | M2 | 单方法超预算时整片输出并标 `oversized`，不截断不拆方法 | 「方法不被截断」是硬不变量；超预算的降级（裁上下文→压记忆→拆 chunk，ARCHITECTURE 6.3）属下游职责，切片阶段只负责标记 |
 | 2026-10-04 | M2 | V2 只建 `review_chunk` 表，不写 JdbcChunkRepository | M2 验证点是纯 domain 单测；持久化在 M3 落 checkpoint 时才需要，提前写无处验证 |
+| 2026-10-04 | M3 | 用标准虚拟线程池（`Executors.newVirtualThreadPerTaskExecutor()`）而非预览 API `StructuredTaskScope` | `StructuredTaskScope` 是预览 API，需 `--enable-preview`；标准虚拟线程池 API 稳定、功能够用 |
+| 2026-10-04 | M3 | `DagDefinition.Builder.addDependency` 中特殊处理 `List.of()` 返回的不可变列表 | `addNode` 时用 `List.of()` 初始化依赖列表，`addDependency` 追加时会抛 `UnsupportedOperationException`；检测到不可变列表时重建为 `ArrayList` |
+| 2026-10-04 | M3 | 测试前手动清空数据库（`truncate review_chunk, node_run, review_task cascade`） | IT 间可能有残留数据（特别是 `chunk_id` 主键冲突）；未配置 `@Transactional` + `@Rollback` 自动回滚 |
+| 2026-10-05 | M4 | LLM 走 OpenAI 兼容协议 + 第三方中转端点 `https://api.aiblitz.io`（Claude 分组），模型 `claude-haiku-4-5-20251001` | 用户提供该中转端点与 key；Spring AI OpenAI starter 直接按 base-url 指向即可。haiku 快且省，够验证点。连通性已只读自测通过 |
+| 2026-10-05 | M4 | 「非法输出触发重试/降级」用 stub `LlmClient` 的纯单测验证，不用真实 LLM | 真实模型输出不可控，无法确定性复现畸形输出来触发重试路径；happy-path（合法 Finding JSON）才用真实 LLM IT。用户确认「必须真实 LLM IT」指 happy-path 这条 |
+| 2026-10-05 | M4 | `application.yml` 的 `spring.ai.openai.api-key` 给非空占位默认值 `placeholder-no-key` | Spring AI 对空 api-key 在**启动期**抛「OpenAI API key must be set」，会拖垮现有不需要 LLM 的 IT 的上下文加载；给占位值让上下文能起，真实调用由 `ReviewAgentIT` 按真实 key 存在与否 gate |
+| 2026-10-05 | M4 | `ReviewAgent` 重试耗尽后降级（返回空 Findings + 原因），不抛异常中断 DAG | 单个 chunk 评审失败不应让整个 PR 评审失败；降级信息上交下游（ChunkReduce / GlobalReduce）决策，符合 ARCHITECTURE 6.3 降级思路 |
+| 2026-10-05 | M4 | domain 层 `FindingJsonParser` 直接用 Jackson `ObjectMapper` | Jackson 为纯计算库、无 Spring 耦合，与 M2 的 jtokkit / javaparser 同层惯例一致，不破坏 domain 纯度；Bean 注入用容器的 `ObjectMapper`，`new` 构造用于单测 |
+| 2026-10-05 | M4 | 本会话 Docker 无法启动，M4 真实 LLM 验证点未跑，不标完成 | `docker.exe` 在当前 shell 报 Permission denied（环境限制），依赖中间件的 IT 全部无法运行；按会话协议「验证点不通过不进下一里程碑」，M4 标「代码完成、待验证」 |
+| 2026-10-09 | M4 | 补跑真实 LLM IT 通过，M4 标完成 | Docker 本会话恢复正常；`ReviewAgentIT` 实跑 11.76s，真实模型返回 4 条 Finding、attempts=1、未降级，验证点达成。全仓 `mvn verify` 8 模块绿 |
+| 2026-10-09 | M4 | `ChunkRepositoryIT` 改用独立 repo 名 + `@AfterEach` 清理 | 原用例硬编码 `owner/repo` 且不清理，残留 `review_task` 让 `insertIfAbsent` 被唯一索引拦掉，后续插 chunk 撞外键失败。与 `ReviewTaskRepositoryIT` 的既有做法对齐（M3 遗留的「IT 间残留数据干扰」技术债的局部解决） |
 
 ## 环境与常用命令
 

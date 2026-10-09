@@ -63,6 +63,12 @@
             <groupId>com.knuddels</groupId>
             <artifactId>jtokkit</artifactId>
         </dependency>
+        <!-- M4：LLM 接入（OpenAI 兼容协议，base-url 指向中转端点）。
+             只在 infrastructure 层用，domain 的 LlmClient 端口不依赖它。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
