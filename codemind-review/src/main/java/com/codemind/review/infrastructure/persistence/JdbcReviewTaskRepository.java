@@ -30,6 +30,12 @@ public class JdbcReviewTaskRepository implements ReviewTaskRepository {
             where repo = :repo and pr_number = :prNumber and head_sha = :headSha
             """;
 
+    private static final String SELECT_BY_ID_SQL = """
+            select task_id, repo, pr_number, head_sha, base_sha, source_event_id, status, created_at
+            from review_task
+            where task_id = :taskId
+            """;
+
     private final JdbcClient jdbcClient;
 
     public JdbcReviewTaskRepository(JdbcClient jdbcClient) {
@@ -58,6 +64,14 @@ public class JdbcReviewTaskRepository implements ReviewTaskRepository {
                 .param("repo", repo)
                 .param("prNumber", prNumber)
                 .param("headSha", headSha)
+                .query(this::mapRow)
+                .optional();
+    }
+
+    @Override
+    public Optional<ReviewTask> findById(String taskId) {
+        return jdbcClient.sql(SELECT_BY_ID_SQL)
+                .param("taskId", UUID.fromString(taskId))
                 .query(this::mapRow)
                 .optional();
     }

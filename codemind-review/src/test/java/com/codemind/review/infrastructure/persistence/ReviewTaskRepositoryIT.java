@@ -85,6 +85,26 @@ class ReviewTaskRepositoryIT {
         assertThat(repository.findByPrHead(repo, 999, "nope")).isEmpty();
     }
 
+    @Test
+    void 按taskId查回重建的聚合() {
+        ReviewTask task = ReviewTask.create(repo, 7, "headsha", "basesha", UUID.randomUUID().toString());
+        assertThat(repository.insertIfAbsent(task)).isTrue();
+
+        ReviewTask found = repository.findById(task.taskId()).orElseThrow();
+
+        assertThat(found.taskId()).isEqualTo(task.taskId());
+        assertThat(found.repo()).isEqualTo(repo);
+        assertThat(found.prNumber()).isEqualTo(7);
+        assertThat(found.headSha()).isEqualTo("headsha");
+        assertThat(found.baseSha()).isEqualTo("basesha");
+        assertThat(found.status()).isEqualTo(ReviewTaskStatus.CREATED);
+    }
+
+    @Test
+    void 按未知taskId查返回空() {
+        assertThat(repository.findById(UUID.randomUUID().toString())).isEmpty();
+    }
+
     private int countRows() {
         return jdbcClient.sql("select count(*) from review_task where repo = :repo")
                 .param("repo", repo)
