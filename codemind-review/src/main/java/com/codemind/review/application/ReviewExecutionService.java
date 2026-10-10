@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 
 /**
  * 评审执行编排（M7a）：把「取 PR 内容 → 建 DAG 上下文 → 跑跨会话 Map-Reduce」串起来。
@@ -36,7 +37,9 @@ public class ReviewExecutionService {
     private final SemanticChunker chunker;
     private final ChunkRepository chunkRepository;
     private final ChunkBudget chunkBudget;
+    private final ExecutorService reviewExecutor;
 
+    /** 测试用：不带线程池，只能同步执行。 */
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -44,6 +47,18 @@ public class ReviewExecutionService {
                                   SemanticChunker chunker,
                                   ChunkRepository chunkRepository,
                                   ChunkBudget chunkBudget) {
+        this(scmContentPort, taskRepository, orchestrator, changeMapAgent, chunker,
+                chunkRepository, chunkBudget, null);
+    }
+
+    public ReviewExecutionService(ScmContentPort scmContentPort,
+                                  ReviewTaskRepository taskRepository,
+                                  DagOrchestrator orchestrator,
+                                  ChangeMapAgent changeMapAgent,
+                                  SemanticChunker chunker,
+                                  ChunkRepository chunkRepository,
+                                  ChunkBudget chunkBudget,
+                                  ExecutorService reviewExecutor) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -51,6 +66,26 @@ public class ReviewExecutionService {
         this.chunker = Objects.requireNonNull(chunker, "chunker");
         this.chunkRepository = Objects.requireNonNull(chunkRepository, "chunkRepository");
         this.chunkBudget = Objects.requireNonNull(chunkBudget, "chunkBudget");
+        this.reviewExecutor = reviewExecutor;
+    }
+
+    /**
+     * 异步提交评审（M7a）。MQ 消费线程不能被几十秒的 LLM 调用阻塞——阻塞会触发消息重投。
+     *
+     * <p>评审失败只记日志，不外抛：单个 PR 评审失败不该让 MQ 反复重投同一条消息
+     * （任务已标 FAILED，恢复驱动会捞它）。
+     */
+    public void submitAsync(String taskId) {
+        if (reviewExecutor == null) {
+            throw new IllegalStateException("未配置 reviewExecutor，无法异步执行");
+        }
+        reviewExecutor.submit(() -> {
+            try {
+                executeReview(taskId);
+            } catch (RuntimeException e) {
+                log.error("异步评审失败 taskId={}", taskId, e);
+            }
+        });
     }
 
     /**

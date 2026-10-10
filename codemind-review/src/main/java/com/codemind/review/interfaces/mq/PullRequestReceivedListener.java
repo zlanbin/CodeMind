@@ -1,7 +1,9 @@
 package com.codemind.review.interfaces.mq;
 
 import com.codemind.common.event.PullRequestReceived;
+import com.codemind.review.application.ReviewExecutionService;
 import com.codemind.review.application.ReviewTaskApplicationService;
+import com.codemind.review.domain.task.ReviewTask;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
@@ -25,11 +27,14 @@ public class PullRequestReceivedListener implements RocketMQListener<String> {
     private static final Logger log = LoggerFactory.getLogger(PullRequestReceivedListener.class);
 
     private final ReviewTaskApplicationService reviewTaskApplicationService;
+    private final ReviewExecutionService reviewExecutionService;
     private final ObjectMapper objectMapper;
 
     public PullRequestReceivedListener(ReviewTaskApplicationService reviewTaskApplicationService,
+                                       ReviewExecutionService reviewExecutionService,
                                        ObjectMapper objectMapper) {
         this.reviewTaskApplicationService = reviewTaskApplicationService;
+        this.reviewExecutionService = reviewExecutionService;
         this.objectMapper = objectMapper;
     }
 
@@ -38,7 +43,10 @@ public class PullRequestReceivedListener implements RocketMQListener<String> {
         PullRequestReceived event = deserialize(payload);
         log.debug("收到 PullRequestReceived eventId={} repo={} pr={}",
                 event.eventId(), event.repo(), event.prNumber());
-        reviewTaskApplicationService.createTaskFrom(event);
+        ReviewTask task = reviewTaskApplicationService.createTaskFrom(event);
+        // 异步触发：评审要等几十秒 LLM，阻塞消费线程会触发消息重投。
+        // 重复投递的判重在 ReviewExecutionService（按任务状态），这里不做判断。
+        reviewExecutionService.submitAsync(task.taskId());
     }
 
     private PullRequestReceived deserialize(String payload) {

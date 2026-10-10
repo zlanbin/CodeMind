@@ -44,6 +44,12 @@ codemind:
       pull-request-received: codemind-review-pr-received
   llm:
     max-retries: ${CODEMIND_LLM_MAX_RETRIES:2}
+  dag:
+    # 单节点超时。子会话要等真实 LLM，给足
+    node-timeout: ${CODEMIND_DAG_NODE_TIMEOUT:120s}
+    node-retries: ${CODEMIND_DAG_NODE_RETRIES:1}
+    # 单片 diff 的 token 上限；0 表示用默认（总预算 128k × 30%）
+    diff-budget: ${CODEMIND_DIFF_BUDGET:0}
 
 management:
   endpoints:
