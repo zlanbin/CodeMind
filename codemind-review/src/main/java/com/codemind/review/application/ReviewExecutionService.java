@@ -9,6 +9,7 @@ import com.codemind.review.domain.task.ReviewTaskRepository;
 import com.codemind.review.domain.task.ReviewTaskStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -51,6 +52,8 @@ public class ReviewExecutionService {
                 chunkRepository, chunkBudget, null);
     }
 
+    /** Spring 用这个：有两个构造器时必须显式指明注入哪个。 */
+    @Autowired
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
