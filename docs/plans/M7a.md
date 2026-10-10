@@ -32,7 +32,7 @@
 
 ---
 
-### 任务 1：integration 侧 GitHub 读客户端
+### Task 1: integration 侧 GitHub 读客户端
 
 **文件：**
 - 新建 `codemind-integration/src/main/java/com/codemind/integration/application/port/ScmClient.java`
@@ -94,7 +94,7 @@ git commit -m "M7a: integration 侧 GitHub 读客户端（拉 diff 与文件源�
 
 ---
 
-### 任务 2：internal 端点对内暴露 PR 内容
+### Task 2: internal 端点对内暴露 PR 内容
 
 **文件：**
 - 新建 `codemind-integration/src/main/java/com/codemind/integration/application/PullRequestContentService.java`
@@ -149,7 +149,7 @@ git commit -m "M7a: internal 端点对内暴露 PR diff 与文件源码"
 
 ---
 
-### 任务 3：review 侧 ScmContentPort 与 Feign 适配
+### Task 3: review 侧 ScmContentPort 与 Feign 适配
 
 **文件：**
 - 新建 `codemind-review/src/main/java/com/codemind/review/domain/scm/ScmContentPort.java`
@@ -201,7 +201,7 @@ git commit -m "M7a: review 侧 ScmContentPort 与 Feign 适配到 integration"
 
 ---
 
-### 任务 4：`ReviewTaskRepository.findById`
+### Task 4: `ReviewTaskRepository.findById`
 
 **文件：**
 - 改 `codemind-review/src/main/java/com/codemind/review/domain/task/ReviewTaskRepository.java`
@@ -246,7 +246,7 @@ git commit -m "M7a: ReviewTaskRepository 补 findById"
 
 ---
 
-### 任务 5：`ReviewExecutionService` 串入口链路
+### Task 5: `ReviewExecutionService` 串入口链路
 
 **文件：**
 - 新建 `codemind-review/src/main/java/com/codemind/review/application/ReviewExecutionService.java`
@@ -312,7 +312,7 @@ git commit -m "M7a: ReviewExecutionService 串起取内容到跨会话评审"
 
 ---
 
-### 任务 6：Spring 装配与异步触发
+### Task 6: Spring 装配与异步触发
 
 **文件：**
 - 新建 `codemind-review/src/main/java/com/codemind/review/infrastructure/config/ReviewDagConfig.java`
@@ -359,7 +359,7 @@ git commit -m "M7a: DAG 装配成 bean，建任务后异步触发评审"
 
 ---
 
-### 任务 7：真实 PR 端到端验证
+### Task 7: 真实 PR 端到端验证
 
 **文件：**
 - 新建 `codemind-review/src/test/java/com/codemind/review/application/RealPullRequestReviewIT.java`
@@ -407,7 +407,7 @@ git commit -m "M7a: 真实 PR 端到端 IT（拉 diff 到 AGGREGATING）"
 
 ---
 
-### 任务 8：卡死任务恢复驱动
+### Task 8: 卡死任务恢复驱动
 
 进程在评审中途重启后，任务会停在 `PLANNING` / `REVIEWING` / `AGGREGATING` 永不推进。checkpoint 已在 `node_run` 表里、`DagScheduler` 本身支持续跑，缺的只是「谁来触发」。
 
