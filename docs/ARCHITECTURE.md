@@ -39,7 +39,8 @@ PR 提交后自动触发多 Agent 并行评审，按代码规范、安全、性�
 | 数据库 | PostgreSQL 16 + pgvector | 关系与向量同库 |
 | 缓存 | Redis 7 | 任务记忆、幂等键、限流 |
 | MQ | RocketMQ 5.x | 领域事件 |
-| 代码解析 | JavaParser、java-diff-utils | |
+| 代码解析 | JavaParser 3.28.2（AST 方法边界 / 签名）、自写 `DiffParser`（unified diff） | java-diff-utils 实测解析真实 GitHub diff 不可靠，M2 起改自写，见 PROGRESS 决策日志 |
+| Token 估算 | jtokkit 1.1.0（`cl100k_base`） | 真实 BPE 分词，非字符数启发式 |
 | 可观测 | Micrometer + Prometheus + Grafana | Token 成本、节点耗时 |
 | 部署 | Docker Compose | |
 
@@ -104,13 +105,17 @@ com.codemind.<service>
 ```
 ReviewTask (聚合根)
  ├─ taskId, repo, prNumber, headSha, baseSha, status
- ├─ ChangeMap (值对象)        # 全局变更地图
- ├─ List<ReviewChunk>         # 切片，每片对应一个 LLM 子会话
- │    └─ chunkId, files, tokenEstimate, ChunkSummary(值对象), status
- ├─ List<Finding>
+ ├─ ChangeMap (值对象)            # 全局变更地图（含 AST 确定性提取的 List<SignatureChange>）
+ ├─ List<ReviewChunk>             # 切片，每片对应一个 LLM 子会话（规划阶段产物）
+ │    └─ chunkId, files, changedSymbols, diffContent, tokenEstimate, oversized
+ ├─ Map<chunkId, ChunkSummary>    # 各片结构化摘要（评审阶段产物，按 chunkId 关联，见 6.4）
+ ├─ List<Finding>                 # 片级去重后 + GlobalReduce 的跨文件意见
  │    └─ file, line, severity, category, message, suggestion, fingerprint
  └─ ReviewReport (值对象)
 ```
+
+方法限定名格式：`外层类名#方法名(参数类型, ...)`，如 `OrderService#cancel(int)`。带参数类型是 M6 的
+必要条件——否则无法区分重载，也无法判断跨文件签名是否一致。不含包名、不消解嵌套类同名歧义。
 
 状态机：`CREATED → PLANNING → REVIEWING → AGGREGATING → PUBLISHED`，任一阶段可转 `FAILED`，`FAILED` 可从 checkpoint 恢复回原阶段。
 
@@ -121,23 +126,29 @@ ReviewTask (聚合根)
 ## 5. 评审工作流（DAG）
 
 ```
-ParseDiff → PlanChunks → BuildChangeMap
-                              │
-              ┌───────────────┼───────────────┐   按 chunk 动态 fan-out
-              ▼               ▼               ▼
-         RecallContext   RecallContext   RecallContext   召回调用链代码 + 记忆 + 规则
-              │
-     ┌────┬───┴┬────┐                                    按维度并行
+BuildChangeMap → PlanChunks
+                      │
+      ┌───────────────┼───────────────┐   按 chunk 动态 fan-out
+      ▼               ▼               ▼
+ RecallContext   RecallContext   RecallContext   召回调用链代码 + 记忆 + 规则（留 M8/M11）
+      │
+     ┌────┬───┴┬────┐                            按维度并行，各注入 ChangeMap
    Style Security Perf Test
      └────┴───┬┴────┘
-          ChunkReduce  → ChunkSummary + Findings
+          ChunkReduce  → 去重 Findings + 合并 ChunkSummary
               └───────────────┬───────────────┘
-                         GlobalReduce   只读摘要，不读原始代码
+                         GlobalReduce   只读 ChangeMap + 各片摘要，不读原始 diff
                               │
-                     Dedup & Filter（记忆过滤）
+                     Dedup & Filter（记忆过滤，留 M9）
                               │
-                           Publish
+                           Publish（留 M7）
 ```
+
+M6 已落地：`BuildChangeMap → PlanChunks → 4N 个子会话 → N 个 ChunkReduce → GlobalReduce`，
+状态随之推进 `PLANNING → REVIEWING → AGGREGATING`（`PUBLISHED` 的入口是回写 PR，属 M7）。
+`BuildChangeMap` 排在 `PlanChunks` 之前（原图为之后）：两者无数据依赖（地图要的是全量文件列表与签名，
+与切片结果无关），但地图先行可在任何子会话启动前就落进共享状态。diff 解析不单列节点，
+由两个节点各自调用 `DiffParser`（纯函数，无副作用）。
 
 ### 5.1 DAG 引擎范围
 
@@ -158,9 +169,15 @@ ParseDiff → PlanChunks → BuildChangeMap
 ### 6.2 分层 Map-Reduce
 
 1. **全局变更地图**（1 个轻量会话）：只输入文件列表、方法签名变更、diff 统计，输出 `ChangeMap`（PR 意图、模块划分、高风险文件）。之后每个子会话都注入它。
+   方法签名变更由 AST + diff 删除行**确定性**提取（`ChangedSignatureExtractor`），不依赖 LLM；
+   因此 LLM 部分降级时，`ChangeMap` 的签名变更依然完整。
 2. **语义切片**（纯算法，不调 LLM）：文件 → hunk → 方法，按 AST 边界切，不截断方法；有调用关系的变更合进同一 chunk；按 Token 预算装箱。
-3. **子会话评审**（N 个并行会话）：输出 Findings + 结构化 `ChunkSummary`。
-4. **全局归约**：只读所有 ChunkSummary，回答跨 chunk 问题，发现跨文件问题；摘要过多时树形递归归约。
+   「合进同一 chunk」是**软约束**：聚合体整体超预算时沿合并缝拆回原子单元（见 6.3）。
+3. **子会话评审**（N 个并行会话）：输出 Findings + 结构化 `ChunkSummary`（同一次 LLM 调用产出）。
+   摘要解析失败只降级摘要，不连带丢弃同次已解析成功的 Findings。
+4. **全局归约**：只读 `ChangeMap` + 所有 ChunkSummary（**不读原始 diff 与源码**），回答跨 chunk 问题，
+   发现跨文件问题，输出与 chunk 级同结构的 Finding（category 以 `CORRECTNESS` 为主），
+   由编排器直接追加到任务级 Findings，不额外加 MergeFindings 节点；摘要过多时树形递归归约（留 M7，M6 只做一层）。
 5. **增量与续跑**：再次 push 只对新 diff 切片，旧摘要从任务记忆复用，Finding 按 fingerprint 去重；失败从 checkpoint 续跑。
 
 ### 6.3 Token 预算（单个子会话）
@@ -176,6 +193,14 @@ ParseDiff → PlanChunks → BuildChangeMap
 
 超预算降级顺序：裁剪上下文代码 → 压缩记忆条数 → 拆分 chunk。
 
+拆分 chunk 的边界（M6 落地）：拆的是**调用关系聚合**，不是方法。聚合单元超 diff 预算时沿合并缝
+拆回原子单元（一个原子单元 = 一个完整方法的全部 hunk，或非 Java / 解析失败时的单个 hunk）；
+单个原子单元自身超预算时整片输出并标 `oversized`，**不截断、不丢弃**——「方法不被截断」是硬不变量，
+排在预算之前。被拆开的调用关系由 GlobalReduce 跨片兜（它只读摘要，正为此准备）。
+
+前两步（裁剪上下文代码、压缩记忆）依赖 RecallContext 与记忆召回，分别留给 M8 之后的里程碑；
+M6 只实现了第三步。
+
 ### 6.4 ChunkSummary 结构
 
 ```json
@@ -187,7 +212,18 @@ ParseDiff → PlanChunks → BuildChangeMap
 }
 ```
 
-`crossChunkQuestions`：子会话把自己看不到的问题显式上交给 GlobalReduce。
+`crossChunkQuestions`：子会话把自己看不到的问题显式上交给 GlobalReduce。约束为「本片调用或被调用的
+接口定义在别的文件、本片看不到」这类问题，不做万能兜底（否则 GlobalReduce 负担过重且信噪比下降）。
+
+`changedSymbols` 必须带参数类型（`OrderService#cancel(Long)`），否则 GlobalReduce 无从判断调用方与
+定义方是否对得上。两重保障：prompt 明确要求，且 `ChangeMap` 里有 AST 确定性提取的签名可交叉校验。
+
+完整性校验：`ChunkReduceNode` 合并同一 chunk 各维度的摘要（符号 / 风险 / 跨片问题取并集，
+intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不完整则记入该片的降级信息——
+否则 GlobalReduce 会因摘要为空而静默失效。
+
+`ChunkSummary` 按 `chunkId` 关联在 `ReviewTask` 上（而非塞进 `ReviewChunk` 值对象）：切片是规划阶段
+产物、摘要是评审阶段产物，分开存不必为挂摘要重建切片，也不动 `review_chunk` 表结构。
 
 ## 7. 智能体记忆（memory-service）
 

@@ -36,7 +36,7 @@ class SemanticChunkerTest {
 
         assertThat(chunks).hasSize(1);
         ReviewChunk c = chunks.get(0);
-        assertThat(c.changedSymbols()).containsExactly("OrderService#cancel");
+        assertThat(c.changedSymbols()).containsExactly("OrderService#cancel(int)");
         assertThat(c.files()).containsExactly("OrderService.java");
         assertThat(c.oversized()).isFalse();
         // 方法未被截断：hunk 的全部行都在片内
@@ -57,7 +57,7 @@ class SemanticChunkerTest {
         List<ReviewChunk> big = chunker.chunk(files, sources, ChunkBudget.ofDefault());
         assertThat(big).hasSize(1);
         assertThat(big.get(0).changedSymbols())
-                .containsExactlyInAnyOrder("Calculator#add", "Calculator#mul");
+                .containsExactlyInAnyOrder("Calculator#add(int, int)", "Calculator#mul(int, int)");
 
         // 预算略小于两方法之和：切成两片，每片一个方法，均不超预算、不截断
         int combined = big.get(0).tokenEstimate();
@@ -83,7 +83,7 @@ class SemanticChunkerTest {
         assertThat(chunks.get(0).files())
                 .containsExactlyInAnyOrder("OrderService.java", "InventoryClient.java");
         assertThat(chunks.get(0).changedSymbols())
-                .contains("OrderService#cancel", "InventoryClient#rollback");
+                .contains("OrderService#cancel(int)", "InventoryClient#rollback(int)");
     }
 
     @Test
@@ -98,7 +98,7 @@ class SemanticChunkerTest {
         assertThat(chunks).hasSize(1);
         ReviewChunk c = chunks.get(0);
         assertThat(c.oversized()).isTrue();
-        assertThat(c.changedSymbols()).containsExactly("BigService#compute");
+        assertThat(c.changedSymbols()).containsExactly("BigService#compute(int, int, int)");
         // 退化但不截断：方法体每一行仍在片内
         assertThat(c.diffContent())
                 .contains("public int compute(int a, int b, int c) {")
@@ -152,5 +152,70 @@ class SemanticChunkerTest {
     void emptyInputYieldsNoChunks() {
         SemanticChunker chunker = new SemanticChunker(new LengthTokenEstimator());
         assertThat(chunker.chunk(List.of(), Map.of(), ChunkBudget.ofDefault())).isEmpty();
+    }
+
+    // ---------- M6：超预算时沿合并缝拆分（ARCHITECTURE 6.3 降级链最后一步）----------
+
+    @Test
+    void oversizedMergedUnitIsSplitBackAlongMergeSeam() {
+        SemanticChunker chunker = new SemanticChunker(new LengthTokenEstimator());
+        List<DiffFile> files = parser.parse(DiffResources.diff("cross-file.diff"));
+        Map<String, String> sources = Map.of(
+                "OrderService.java", DiffResources.source("OrderServiceCross.java"),
+                "InventoryClient.java", DiffResources.source("InventoryClient.java"));
+
+        // 大预算：调用关系成立，合成 1 片（M2 既有行为）
+        List<ReviewChunk> merged = chunker.chunk(files, sources, ChunkBudget.ofDefault());
+        assertThat(merged).hasSize(1);
+        int mergedTokens = merged.get(0).tokenEstimate();
+
+        // 预算小于聚合体：沿合并缝拆开，而不是整片超预算输出
+        List<ReviewChunk> split = chunker.chunk(files, sources, ChunkBudget.ofDiffBudget(mergedTokens - 10));
+
+        assertThat(split).hasSizeGreaterThan(1);
+        assertThat(split).allSatisfy(c -> assertThat(c.oversized())
+                .as("拆开后每片都该在预算内，片 %s", c.chunkId())
+                .isFalse());
+        // 两个文件各自的变更都还在，没丢
+        assertThat(split.stream().flatMap(c -> c.files().stream()).toList())
+                .contains("OrderService.java", "InventoryClient.java");
+        assertThat(split.stream().flatMap(c -> c.changedSymbols().stream()).toList())
+                .contains("OrderService#cancel(int)", "InventoryClient#rollback(int)");
+    }
+
+    @Test
+    void splitChunksKeepEachMethodIntact() {
+        SemanticChunker chunker = new SemanticChunker(new LengthTokenEstimator());
+        List<DiffFile> files = parser.parse(DiffResources.diff("cross-file.diff"));
+        Map<String, String> sources = Map.of(
+                "OrderService.java", DiffResources.source("OrderServiceCross.java"),
+                "InventoryClient.java", DiffResources.source("InventoryClient.java"));
+        int mergedTokens = chunker.chunk(files, sources, ChunkBudget.ofDefault()).get(0).tokenEstimate();
+
+        List<ReviewChunk> split = chunker.chunk(files, sources, ChunkBudget.ofDiffBudget(mergedTokens - 10));
+
+        // 拆的是聚合关系，不是方法：每个符号所在片里，该方法的 diff 行完整
+        String all = split.stream().map(ReviewChunk::diffContent).reduce("", (a, b) -> a + "\n" + b);
+        assertThat(all).contains("public void cancel(int id)");
+        assertThat(all).contains("rollback(id)");
+        // 每片都以文件头开始，是合法的 unified diff 片段
+        assertThat(split).allSatisfy(c -> assertThat(c.diffContent()).startsWith("--- a/"));
+    }
+
+    @Test
+    void singleOversizedMethodIsStillNotSplit() {
+        SemanticChunker chunker = new SemanticChunker(new LengthTokenEstimator());
+        List<DiffFile> files = parser.parse(DiffResources.diff("oversized-method.diff"));
+        Map<String, String> sources = Map.of("BigService.java", DiffResources.source("BigService.java"));
+
+        // 单个原子单元（一个完整方法）超预算：不可拆，仍整片 + oversized
+        List<ReviewChunk> chunks = chunker.chunk(files, sources, ChunkBudget.ofDiffBudget(20));
+
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.get(0).oversized()).isTrue();
+        assertThat(chunks.get(0).changedSymbols()).containsExactly("BigService#compute(int, int, int)");
+        assertThat(chunks.get(0).diffContent())
+                .contains("public int compute(int a, int b, int c) {")
+                .contains("return r;");
     }
 }

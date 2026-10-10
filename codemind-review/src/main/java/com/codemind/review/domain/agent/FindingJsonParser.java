@@ -9,8 +9,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 把 LLM 原始文本输出解析为 {@link Finding} 列表。
@@ -28,9 +26,6 @@ import java.util.regex.Pattern;
  * {@link FindingParseException}，交由 {@link ReviewAgent} 重试/降级。Jackson 为纯计算库，不耦合 Spring。
  */
 public final class FindingJsonParser {
-
-    private static final Pattern FENCE =
-            Pattern.compile("```(?:json)?\\s*(.*?)\\s*```", Pattern.DOTALL);
 
     private final ObjectMapper objectMapper;
 
@@ -111,15 +106,10 @@ public final class FindingJsonParser {
     }
 
     private static String stripFence(String text) {
-        Matcher m = FENCE.matcher(text);
-        if (m.find()) {
-            return m.group(1);
-        }
-        return text;
+        return JsonFences.strip(text);
     }
 
     private static String preview(String s) {
-        String oneLine = s.replaceAll("\\s+", " ").trim();
-        return oneLine.length() > 200 ? oneLine.substring(0, 200) + "…" : oneLine;
+        return JsonFences.preview(s);
     }
 }

@@ -1,0 +1,46 @@
+diff --git a/PaymentGateway.java b/PaymentGateway.java
+index 1111111..2222222 100644
+--- a/PaymentGateway.java
++++ b/PaymentGateway.java
+@@ -8,4 +8,6 @@ public class PaymentGateway {
+     public void refundOrder(long orderId, int amountCents) {
++        auditLogger.record("refund-start", orderId);
++        // 调用方按 String 传票据号，但 RefundClient 已改成 long
+         refundClient.submitRefund("TICKET-" + orderId, amountCents);
+-        auditLogger.record("refund", orderId);
++        auditLogger.record("refund-done", orderId);
+     }
+diff --git a/RefundClient.java b/RefundClient.java
+index 3333333..4444444 100644
+--- a/RefundClient.java
++++ b/RefundClient.java
+@@ -5,6 +5,6 @@ public class RefundClient {
+-    public void submitRefund(String ticketId, int amountCents) {
++    public void submitRefund(long ticketId, int amountCents) {
+         if (amountCents <= 0) {
+             throw new IllegalArgumentException("amount must be positive");
+         }
+         send(ticketId, amountCents);
+     }
+diff --git a/AuditLogger.java b/AuditLogger.java
+index 5555555..6666666 100644
+--- a/AuditLogger.java
++++ b/AuditLogger.java
+@@ -10,5 +10,6 @@ public class AuditLogger {
+     public void record(String action, long orderId) {
+         entries.add(action + ":" + orderId);
+-        if (entries.size() > 500) {
++        if (entries.size() > 1000) {
++            entries.clear();
+         }
+     }
+diff --git a/NotificationSender.java b/NotificationSender.java
+index 7777777..8888888 100644
+--- a/NotificationSender.java
++++ b/NotificationSender.java
+@@ -5,4 +5,4 @@ public class NotificationSender {
+     public void notifyRefund(long orderId, String channel) {
+-        String message = "refunded";
++        String message = buildMessage(orderId);
+         dispatch(channel, message);
+     }

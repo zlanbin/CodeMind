@@ -32,13 +32,21 @@ public class PlanChunksNode implements Node {
     private final SemanticChunker chunker;
     private final ChunkRepository chunkRepository;
     private final ReviewTaskRepository taskRepository;
+    private final ChunkBudget budget;
 
     public PlanChunksNode(String nodeId, SemanticChunker chunker,
                           ChunkRepository chunkRepository, ReviewTaskRepository taskRepository) {
+        this(nodeId, chunker, chunkRepository, taskRepository, ChunkBudget.ofDefault());
+    }
+
+    /** M6：预算可注入，便于用小预算构造「超预算 PR 必须多片」的场景。 */
+    public PlanChunksNode(String nodeId, SemanticChunker chunker, ChunkRepository chunkRepository,
+                          ReviewTaskRepository taskRepository, ChunkBudget budget) {
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.chunker = Objects.requireNonNull(chunker, "chunker");
         this.chunkRepository = Objects.requireNonNull(chunkRepository, "chunkRepository");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
+        this.budget = Objects.requireNonNull(budget, "budget");
     }
 
     @Override
@@ -62,7 +70,6 @@ public class PlanChunksNode implements Node {
         var diffFiles = parser.parse(diffText);
 
         // 2. 语义切片
-        ChunkBudget budget = ChunkBudget.ofDefault();
         List<ReviewChunk> chunks = chunker.chunk(diffFiles, newSources, budget);
 
         // 3. 持久化切片

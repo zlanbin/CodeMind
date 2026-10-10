@@ -1,5 +1,6 @@
 package com.codemind.review.domain.agent;
 
+import com.codemind.review.domain.changemap.ChangeMap;
 import com.codemind.review.domain.chunk.ReviewChunk;
 import com.codemind.review.domain.finding.Finding;
 import org.slf4j.Logger;
@@ -41,33 +42,59 @@ public final class ReviewAgent {
                   "suggestion": "修改建议",
                   "codeSnippet": "问题所在的关键代码片段"
                 }
-              ]
+              ],
+              "summary": {
+                "changedSymbols": ["本片变更的方法，必须带参数类型，如 OrderService#cancel(Long)"],
+                "intent": "本片变更想做什么，一句话",
+                "risks": ["本片内可见的风险"],
+                "crossChunkQuestions": ["你看不到、需要别人回答的跨文件问题"]
+              }
             }
-            若没有发现问题，返回 {"findings": []}。severity 和 category 必须用上面列出的英文枚举值。
+            若没有发现问题，findings 返回 []，但 summary 必须给出。severity 和 category 必须用上面列出的英文枚举值。
+
+            关于 summary（会被汇总给全局归约会话，它看不到任何 diff，只能看到这些摘要）：
+            - changedSymbols 必须带完整参数类型（写 foo(int) 而不是 foo），否则全局归约无法判断调用方是否对得上；
+            - crossChunkQuestions 只问「本片调用或被调用的接口在别的文件里，而本片看不到它的定义」这类问题，
+              不要把本片自己能判断的事情推给全局归约。
             """;
 
     private final ReviewDimension dimension;
     private final LlmClient llmClient;
     private final FindingJsonParser parser;
+    private final ChunkSummaryJsonParser summaryParser;
     private final int maxRetries;
 
     public ReviewAgent(ReviewDimension dimension, LlmClient llmClient, FindingJsonParser parser, int maxRetries) {
+        this(dimension, llmClient, parser, new ChunkSummaryJsonParser(), maxRetries);
+    }
+
+    public ReviewAgent(ReviewDimension dimension, LlmClient llmClient, FindingJsonParser parser,
+                       ChunkSummaryJsonParser summaryParser, int maxRetries) {
         this.dimension = Objects.requireNonNull(dimension, "dimension");
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.parser = Objects.requireNonNull(parser, "parser");
+        this.summaryParser = Objects.requireNonNull(summaryParser, "summaryParser");
         if (maxRetries < 0) {
             throw new IllegalArgumentException("maxRetries 不能为负");
         }
         this.maxRetries = maxRetries;
     }
 
-    /**
-     * 评审单个 chunk。解析/调用失败按策略重试，耗尽则降级（不抛异常）。
-     */
+    /** 评审单个 chunk，不注入 ChangeMap（M4/M5 行为）。 */
     public AgentReview review(ReviewChunk chunk) {
+        return review(chunk, null);
+    }
+
+    /**
+     * 评审单个 chunk，并注入全局变更地图（M6，ARCHITECTURE 6.2 第 1 步「之后每个子会话都注入它」）。
+     *
+     * <p>解析/调用失败按策略重试，耗尽则降级（不抛异常）。摘要解析失败只降级摘要，
+     * 已解析成功的 Findings 照常返回。
+     */
+    public AgentReview review(ReviewChunk chunk, ChangeMap changeMap) {
         Objects.requireNonNull(chunk, "chunk");
         String systemPrompt = buildSystemPrompt();
-        String userPrompt = buildUserPrompt(chunk);
+        String userPrompt = buildUserPrompt(chunk, changeMap);
 
         String lastError = null;
         int attempts = 0;
@@ -76,9 +103,11 @@ public final class ReviewAgent {
             try {
                 String raw = llmClient.complete(systemPrompt, userPrompt);
                 List<Finding> findings = parser.parse(raw);
-                log.info("[{}] chunk {} 评审完成，{} 条意见（尝试 {}/{}）",
-                        dimension, chunk.chunkId(), findings.size(), attempt + 1, maxRetries + 1);
-                return AgentReview.success(findings, attempts);
+                ChunkSummary summary = parseSummary(raw, chunk.chunkId());
+                log.info("[{}] chunk {} 评审完成，{} 条意见，摘要{}（尝试 {}/{}）",
+                        dimension, chunk.chunkId(), findings.size(),
+                        summary.degraded() ? "降级" : "就绪", attempt + 1, maxRetries + 1);
+                return AgentReview.success(findings, summary, attempts);
             } catch (FindingParseException e) {
                 lastError = "输出不合法: " + e.getMessage();
                 log.warn("[{}] chunk {} 输出解析失败（尝试 {}/{}）: {}",
@@ -91,7 +120,17 @@ public final class ReviewAgent {
         }
 
         log.error("[{}] chunk {} 重试 {} 次仍失败，降级为空结果: {}", dimension, chunk.chunkId(), maxRetries, lastError);
-        return AgentReview.degraded(lastError, attempts);
+        return AgentReview.degraded(lastError, ChunkSummary.degraded(chunk.chunkId(), lastError), attempts);
+    }
+
+    /** 摘要单独降级：不让摘要缺失连带丢掉已解析成功的 Findings。 */
+    private ChunkSummary parseSummary(String raw, String chunkId) {
+        try {
+            return summaryParser.parse(raw, chunkId);
+        } catch (ChunkSummaryParseException e) {
+            log.warn("[{}] chunk {} 摘要解析失败，摘要降级: {}", dimension, chunkId, e.getMessage());
+            return ChunkSummary.degraded(chunkId, "摘要不可用: " + e.getMessage());
+        }
     }
 
     private String buildSystemPrompt() {
@@ -144,15 +183,17 @@ public final class ReviewAgent {
         return dimension;
     }
 
-    private String buildUserPrompt(ReviewChunk chunk) {
+    private String buildUserPrompt(ReviewChunk chunk, ChangeMap changeMap) {
+        String changeMapBlock = changeMap == null ? "" : changeMap.renderForPrompt() + "\n";
         return """
-                请评审以下代码变更。
+                %s请评审以下代码变更。注意你只看到整个 PR 的一个切片，别的切片由其他会话评审。
                 涉及文件: %s
                 变更符号: %s
 
                 unified diff:
                 %s
                 """.formatted(
+                changeMapBlock,
                 String.join(", ", chunk.files()),
                 chunk.changedSymbols().isEmpty() ? "（无）" : String.join(", ", chunk.changedSymbols()),
                 chunk.diffContent());

@@ -5,33 +5,56 @@
 
 ## 当前状态
 
-- 当前里程碑：**M5 已完成**（验证点全绿：同一问题被多 Agent 命中只保留 1 条）；下一个会话进 M6
-- 上次更新：2026-10-09
+- 当前里程碑：**M6 已完成**（验证点：超预算 PR 切成多片、调用方与定义方分落不同片、GlobalReduce
+  只凭各片摘要发现跨文件签名不一致）；下一个会话进 M7
+- 上次更新：2026-10-10
 - 阻塞项：无
+- 未验证项：真实 LLM 的 ChunkSummary 质量（`CrossSessionMapReduceIT` 因无 key 被 `assumeTrue` 跳过）
 
 ## 下一个会话要做的事
 
-**进入 M6：跨会话 Map-Reduce（ChangeMap、ChunkSummary、GlobalReduce）。**
+**进入 M7：回写 PR（行级评论 + 总结报告）。**
 
-验证点（ROADMAP M6）：构造超预算 PR，能发现跨文件签名不一致问题。
+验证点（ROADMAP M7）：在自己的 GitHub 仓库提 PR，看到行级评论。
 
-要做的事（ARCHITECTURE 6 跨会话评审设计）：
-1. 全局变更地图节点（`BuildChangeMapNode`）：只输入文件列表、方法签名变更、diff 统计 → 输出 `ChangeMap`
-   （PR 意图、模块划分、高风险文件），之后每个子会话注入它
-2. `ChunkSummary` 结构：子会话评审时，除了 Findings，还输出结构化摘要（changedSymbols、intent、risks、
-   crossChunkQuestions），由 `ReviewChunkNode` 扩展返回
-3. GlobalReduce 节点：只读所有 ChunkSummary（不读原始 diff），回答跨 chunk 问题，发现跨文件问题
-4. `ReviewTask` 挂 ChangeMap、ChunkSummary、状态流转完善（PLANNING → REVIEWING → AGGREGATING）
-5. 集成测试：构造跨文件签名不一致的多文件 diff，验证 GlobalReduce 能发现
+要做的事：
+1. integration 侧新增 GitHub 回写能力：行级评论（`POST /repos/{owner}/{repo}/pulls/{n}/comments`，
+   需 commit_id + path + line）+ PR 总结评论；Token 走环境变量 `GITHUB_TOKEN`
+2. 评审结果从 review 服务流向 integration：定义领域事件（如 `ReviewCompleted`，放 `codemind-common` 的
+   `event` 包），review 在 AGGREGATING 完成后发布，integration 消费后回写
+3. 状态推进到 `PUBLISHED`（M6 只到 AGGREGATING，`PUBLISHED` 的入口就是回写成功）
+4. `ReviewReport` 值对象（ARCHITECTURE 4 已列，尚未实现）：汇总 Finding 生成总结报告
+5. Finding 的 `line` 落到真实 diff 行：LLM 给的行号可能不在 diff 范围内，GitHub 会拒；
+   需按 hunk 校验并降级为 PR 级评论
+6. 树形递归归约（ARCHITECTURE 6.2 第 4 步，M6 只做一层）：摘要过多时分批归约，阈值待定
+
+先读 ARCHITECTURE 3.3（integration 职责）与 5（DAG 图的 Publish 节点）。
 
 跑验证的前置（已验证可用）：
 ```bash
-cd deploy && docker compose up -d                  # 等 PG / Redis / Nacos healthy
+cd /d/pingshen/deploy && docker compose up -d      # 等 PG / Redis / Nacos healthy
 export CODEMIND_LLM_API_KEY=<中转端点 Claude 分组 key>
 mvn verify
 ```
 注意：`CODEMIND_LLM_API_KEY` 不设时真实 LLM IT 会 `assumeTrue` 跳过，不算验证到。
-安全提醒：key 曾两次贴进聊天记录（上一会话 + 本会话），建议轮换。
+安全提醒：key 曾三次贴进聊天记录（M4 两次 + M6 会话），**强烈建议轮换**。
+
+**本机环境坑（M6 会话实测，下次直接按这个走）：**
+- `docker.exe` 对当前账号**执行不了**（Git Bash、cmd 均「拒绝访问」），而 NTFS ACL 正常、
+  非重解析点、无 `docker-users` 组、TCP 2375 未暴露。疑与 PATH 里的
+  `C:\Program Files\YunShu\utils`（云枢终端管控）有关。**容器只能由用户在受信终端里手工启动**，
+  助手侧只能靠 `netstat` 探 5432/6379/8848/9876 判断是否就绪
+- 宿主机原生 PG 服务 `postgresql-x64-16` 占 5432，与 `codemind-postgres` 容器冲突；
+  征兆是 IT 报「用户 codemind 密码认证失败」（连到了原生 PG）。本会话已 `net stop` 该服务
+- 容器会无故消失（本会话中途 4 个端口同时不再监听，重启 compose 后恢复），verify 失败先探端口
+
+**M6 代码已就绪，可直接复用的东西：**
+- 跨会话全流程入口：`DagOrchestrator.executeCrossSessionReview(buildChangeMapNode, planChunksNode, task, ctx)`
+  → `CrossSessionReviewResult`（changeMap / 各片 ChunkReduceResult / GlobalReduceResult）；
+  `allFindings()` 已做片级 + 跨文件的 fingerprint 合并，`allDegradations()` 汇总全部降级信息
+- `ReviewTask` 已挂 `changeMap()` / `chunkSummaries()` / `findings()`，状态已推到 `AGGREGATING`
+- AST 确定性签名提取：`ChangedSignatureExtractor.extract(List<DiffFile>, Map<path,newSource>)`
+  → `List<SignatureChange>`（ADDED / REMOVED / SIGNATURE_CHANGED / BODY_CHANGED，带参数类型）
 
 **M4 代码已就绪，可直接复用的东西：**
 - 单 Agent 评审入口：`ReviewAgent.review(ReviewChunk)` → `AgentReview`（Finding 列表或降级结果）；
@@ -48,6 +71,126 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M6 跨会话 Map-Reduce（ChangeMap、ChunkSummary、GlobalReduce）—— 完成于 2026-10-10
+
+本会话按 `docs/M6_设计审查.docx` 的检查清单实施，10 项全部落地（含 1 项修订、1 项顺带解决，见下）。
+
+改动范围（review-service domain + infrastructure）：
+
+**M2 切片器升级（两处，都是 M6 的前置条件）**
+
+- `JavaMethodIndex` / 新增 `MethodSignatures`：方法限定名从 `类名#方法名` 升级为
+  **`类名#方法名(参数类型, ...)`**（如 `OrderService#cancel(int)`）。M6 验证点要区分
+  `foo(int)` 与 `foo(String)`，不带参数类型做不到。`SemanticChunker.referencesAny` 同步改为
+  只取裸方法名做调用形态匹配
+- `Unit` + `SemanticChunker.splitOversizedUnits`：**补上 ARCHITECTURE 6.3 降级链的最后一步「拆分 chunk」**。
+  `Unit.absorb` 改为只挂载关系、不并 hunk，保留原子边界；聚合体超 diff 预算时沿合并缝拆回原子单元。
+  单个原子单元（一个完整方法）自身超预算仍标 `oversized` 不拆——「方法不被截断」是硬不变量
+
+**确定性签名提取（domain/chunk）**
+
+- 新增 `ChangedSignatureExtractor` / `SignatureChange`：新侧用 JavaParser 取被 hunk 命中的方法，
+  旧侧从 diff 删除行按正则识别声明，两侧按裸方法名配对 → `SIGNATURE_CHANGED` / `REMOVED` /
+  `ADDED` / `BODY_CHANGED`。**不依赖 LLM**，含关键字黑名单排除 `return foo(x);` 这类调用行，
+  泛型参数按顶层逗号切分
+
+**ChangeMap（新增 domain/changemap 包）**
+
+- `ChangeMap`：LLM 产出（intent / modules / highRiskFiles）+ 确定性产出（files / signatureChanges）；
+  `degraded()` 只影响前者，**LLM 挂了签名变更依然完整**
+- `ChangeMapAgent` / `ChangeMapJsonParser` / `ChangeMapParseException` / `FileStat`：
+  轻量会话，prompt 只给文件列表 + 签名变更 + 增删行数，**不给 diff 本体**（有单测盯着）
+- `dag/BuildChangeMapNode`：从共享状态取 diffText / newSources，解析 → 统计 → 提签名 → 调 Agent
+
+**ChunkSummary（domain/agent）**
+
+- `ChunkSummary`：changedSymbols / intent / risks / crossChunkQuestions + 降级字段；
+  `isComplete()` 校验 changedSymbols 与 intent 非空
+- `ChunkSummaryJsonParser` / `ChunkSummaryParseException`：子会话一次调用同时产出 findings 与 summary
+- `ReviewAgent`：prompt 扩展（要求 changedSymbols 带参数类型、约束 crossChunkQuestions 不兜底）；
+  新增 `review(chunk, changeMap)` 重载注入变更地图；**摘要解析失败只降级摘要，不丢同次已解析的 Findings**
+- `AgentReview`：增加 `summary` 字段（保留 M4/M5 的旧工厂方法签名，不破坏既有调用）
+- `dag/ChunkReduceNode`：合并同一 chunk 各维度摘要（符号/风险/跨片问题取并集，intent 取首个非空），
+  并校验完整性，不完整记入 `degradations`
+- `dag/ChunkReduceResult`：增加 `summary` 字段（保留 M5 的 3 参构造器）
+
+**GlobalReduce**
+
+- `agent/GlobalReduceAgent` / `GlobalReduceResult`：只读 ChangeMap + 各片摘要，输出与 chunk 级同结构的
+  Finding（category 以 CORRECTNESS 为主），失败降级为空结果
+- `dag/GlobalReduceNode`：从上游各 `ChunkReduceResult` 取摘要；某片摘要缺失则跳过该片并记日志，
+  不让整体失效
+- `dag/DagOrchestrator`：新增 `executeCrossSessionReview(...)` 串全流程，ChangeMap 产出后写入共享状态；
+  状态推进 `PLANNING → REVIEWING → AGGREGATING` 并落库；M5 的 `executeReview` 原样保留
+- `dag/CrossSessionReviewResult`：片级 + 跨文件 Finding 按 fingerprint 合并（片级优先，它有具体行号）
+
+**其它**
+
+- `ReviewTask`：新增 `assignChangeMap` / `changeMap()` / `assignChunkSummary` / `chunkSummaries()`
+- `PlanChunksNode`：`ChunkBudget` 改为可注入（原先硬编码 `ofDefault()`），用于构造超预算场景
+- `agent/JsonFences`：抽出三个解析器共用的围栏剥离与预览截断
+- `infrastructure/llm/ReviewAgentConfig`：装配 `ChangeMapAgent` / `GlobalReduceAgent` /
+  两个新解析器；`ReviewAgent` 改用带 summaryParser 的构造器
+- 测试资源 `diff/cross-signature.diff` + 4 个配套源码（PaymentGateway / RefundClient /
+  AuditLogger / NotificationSender）：`RefundClient#submitRefund` 首参 `String → long`，
+  调用方 PaymentGateway 仍传字符串
+
+验证命令与结果：
+
+| 验证点 | 命令 | 结果 |
+|---|---|---|
+| **构造超预算 PR，能发现跨文件签名不一致**（ROADMAP M6） | `mvn verify`（2026-10-10） | **通过**。`CrossSessionMapReduceTest.callerAndCalleeLandInDifferentChunksAndGlobalReduceCatchesMismatch`：真实 `SemanticChunker` + 真实 4 文件 diff + `diffBudget=150` → 切成 3 片，PaymentGateway（调用方）与 RefundClient（定义方）**各自单独一片**；断言①两片各只看到自己一侧，②**任何单片的评审 prompt 都不同时含定义与调用**（否则片内就能发现，用不上全局归约），③GlobalReduce 只凭各片摘要产出 1 条 `file=RefundClient.java` / `category=CORRECTNESS` / message 含 signature 的 Finding |
+| 变更地图不投喂 diff 本体 | `BuildChangeMapNodeTest.promptCarriesSignaturesAndStatsButNotDiffContent` | **通过**。prompt 含文件名、两侧完整签名、`+1/-1` 统计；不含 `@@` 与方法体 |
+| 变更地图降级后签名仍完整 | `BuildChangeMapNodeTest`（2 个用例：LLM 抛异常 / 输出畸形） | **通过**。`degraded=true`、intent 为空，但 `signatureChangesOnly()` 仍有 1 条 |
+| GlobalReduce 不读原始 diff | `CrossSessionMapReduceTest.globalReduceSeesOnlySummariesNoRawDiff` | **通过**。归约 prompt 不含 `diff --git` / `@@ -`；且确实含各片小节与上交的跨片问题 |
+| 摘要不完整要显式降级 | `ChunkReduceNodeTest.recordsDegradationWhenMergedSummaryIncomplete` | **通过**。全维度摘要降级 → 合并后 `isComplete()=false` 且 `degradations` 有记录 |
+| 状态流转 | `CrossSessionMapReduceTest.stateAdvancesThroughPlanningReviewingAggregating` | **通过**。落库顺序 `PLANNING → REVIEWING → AGGREGATING`；终态 AGGREGATING（PUBLISHED 属 M7） |
+| 超预算聚合体沿合并缝拆分 | `SemanticChunkerTest`（3 个新用例） | **通过**。焊接单元拆开后每片都不 `oversized`、方法完整、每片仍是合法 unified diff；单方法超预算仍 `oversized` 不拆 |
+| 全仓回归 | `mvn verify`（2026-10-10 13:0x） | **通过**。8 模块 BUILD SUCCESS；review **92 单测 + 16 IT**，0 失败。3 个 IT skipped 均为真实 LLM 用例（无 key，`assumeTrue`） |
+| 新 Bean 在真实容器装配正确 | `mvn verify` | **通过**。`CrossSessionMapReduceIT` 上下文加载成功（跑 5.48s 后才在 `assumeTrue` 处跳过），4 个新 Bean 装配无误（M5 曾在此类问题上首次 verify 失败） |
+
+断言策略（本会话判定门确认）：确定性 stub + 真实 LLM 双轨。stub 不是返回死字符串，而是**按 prompt 内容作答**
+（`ScriptedLlmClient` / `SignatureAwareLlmClient`）——GlobalReduce 只在摘要里同时出现「定义方声明了
+`submitRefund(long, int)`」和「另一片上交了字符串实参的调用点」时才报问题，两条证据分别来自不同切片的
+summary，变更地图单独给不出第二条。所以断言证明的是「Map-Reduce 把足够信息送到了归约会话」
+（设计审查 Q7 的核心疑问），而非「桩会不会说话」。
+
+遗留问题 / 技术债：
+
+- **真实 LLM 的 ChunkSummary 质量未验**：`CrossSessionMapReduceIT` 需 `CODEMIND_LLM_API_KEY`，
+  本会话未设而跳过。它会打印各片摘要并断言「至少一片的 changedSymbols 带参数签名」。
+  补跑：`export CODEMIND_LLM_API_KEY=<key> && mvn verify -pl codemind-review`
+- 树形递归归约未实现（ARCHITECTURE 6.2 第 4 步）：M6 只做一层，摘要过多时一次性读完，阈值未定，留 M7
+- ARCHITECTURE 6.3 降级链的前两步（裁剪上下文代码、压缩记忆条数）仍未实现，依赖 RecallContext
+  与记忆召回，留 M8 之后；M6 只实现了第三步「拆分 chunk」
+- `ChangedSignatureExtractor` 旧侧靠正则：unified diff 不含旧文件全文，只能从删除行识别声明。
+  识别不到的形态（跨行参数表、注解换行）会漏判为 `BODY_CHANGED`，不会误报成 `SIGNATURE_CHANGED`
+- `ChangeMap` / `ChunkSummary` 未持久化：只挂在聚合内存里，`node_run` 的 checkpoint 间接存了
+  节点结果（`ObjectMapper` 序列化为 JSON，反序列化后需手动转型，M3 遗留的同一问题）。
+  续跑时 ChangeMap 能从 checkpoint 恢复，但未做针对性验证
+- 拆分后「调用关系在同一片」的软约束被牺牲，靠 GlobalReduce 兜。但 GlobalReduce 依赖 LLM，
+  一旦降级这类跨片问题就会漏——确定性兜底（如用 ChangeMap 的签名变更 + 各片符号做纯算法交叉校验）
+  值得考虑，M6 未做
+- `RecallContext` 节点仍未实现（ARCHITECTURE 5 DAG 图里有），子会话目前不注入召回的上下文代码、
+  规则与记忆，留 M8 / M11
+- Token 成本未采集：ChangeMap 1 次 + 子会话 4N 次 + GlobalReduce 1 次，M6 未做估算（M12 接 Micrometer）
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**。本次修订了 2（技术栈清掉未使用的 java-diff-utils、
+补 jtokkit）、4（领域模型图：ChunkSummary 改为按 chunkId 关联、补方法限定名格式）、
+5（DAG 图：BuildChangeMap 前置于 PlanChunks、标注各节点所属里程碑）、6.2 / 6.3 / 6.4（见决策日志）。
+
+与 `M6_设计审查.docx` 的差异（文档本身是 2026-10-09 的评审记录，按原样留档不改）：
+
+- 检查清单第 1 项「修正假设 A」：按 §5 执行，但 §5 说「复用 M2 JavaMethodIndex 的提取能力」
+  **前提不成立**——M2 的限定名不含参数类型且类为包私有，故本会话升级了 `JavaMethodIndex`
+  并新写 `ChangedSignatureExtractor`
+- 检查清单第 5 项写「补全状态流转 PLANNING → REVIEWING → AGGREGATING → **PUBLISHED**」：
+  `PUBLISHED` 的唯一入口是回写 PR（ROADMAP M7），M6 只接到 `AGGREGATING`
+- §5「强化验证用例」建议「4 文件 diff + 小 diffBudget 强制拆成 2+ chunk」：**提出时不可达**
+  （M2 的调用关系合并会把调用方与定义方永久焊在同一片，装箱从不拆 unit，预算压到 80 token
+  也只是标 `oversized`，实测验证过）。本会话补上「拆分 chunk」降级后该场景变为可达，
+  已按原意实现为直证验证点的用例
 
 ### M5 多 Agent 并行评审与 fingerprint 去重 —— 完成于 2026-10-09
 
@@ -393,6 +536,14 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-05 | M4 | 本会话 Docker 无法启动，M4 真实 LLM 验证点未跑，不标完成 | `docker.exe` 在当前 shell 报 Permission denied（环境限制），依赖中间件的 IT 全部无法运行；按会话协议「验证点不通过不进下一里程碑」，M4 标「代码完成、待验证」 |
 | 2026-10-09 | M4 | 补跑真实 LLM IT 通过，M4 标完成 | Docker 本会话恢复正常；`ReviewAgentIT` 实跑 11.76s，真实模型返回 4 条 Finding、attempts=1、未降级，验证点达成。全仓 `mvn verify` 8 模块绿 |
 | 2026-10-09 | M4 | `ChunkRepositoryIT` 改用独立 repo 名 + `@AfterEach` 清理 | 原用例硬编码 `owner/repo` 且不清理，残留 `review_task` 让 `insertIfAbsent` 被唯一索引拦掉，后续插 chunk 撞外键失败。与 `ReviewTaskRepositoryIT` 的既有做法对齐（M3 遗留的「IT 间残留数据干扰」技术债的局部解决） |
+| 2026-10-10 | M6 | 方法限定名升级为带参数类型 `类名#方法名(参数类型, ...)`，改 M2 的 `JavaMethodIndex` | M6 验证点要区分 `foo(int)` 与 `foo(String)`，不带参数类型做不到。设计审查 §5 原以为「复用 M2 已有提取能力」即可，但 M2 的限定名不含参数类型、且 `JavaMethodIndex` 是包私有类，前提不成立。AST 取参数类型是确定性的，比让 LLM 在摘要里补签名可靠，且能反过来校验 LLM 输出（用户在判定门选「升级 JavaMethodIndex」） |
+| 2026-10-10 | M6 | 补上 ARCHITECTURE 6.3 降级链最后一步「拆分 chunk」：聚合体超预算时沿合并缝拆回原子单元 | 原先只有「标 `oversized` 整片输出」，大 PR 真撞上会直接超上下文窗口（M2 把降级定义为「下游职责」，但下游一直没实现）。拆的是调用关系聚合、不是方法——单个原子单元超预算仍不拆，「方法不被截断」是硬不变量，排在预算之前 |
+| 2026-10-10 | M6 | 设计审查 §5 的验证用例设计（4 文件 diff + 小预算强制拆成 2+ chunk）提出时不可达，补上拆分降级后变为可达 | M2 的 `mergeByCallRelationship` 只要在 B 的 diff 文本里看到 A 的方法名加括号就并查集合并，而 `packIntoChunks` 从不拆 unit——调用方与定义方只要调用行可见就必然同片（实测 `diffBudget=80` 仍同片，只是标 `oversized`）。即「验证跨会话归约」与「保证调用关系同片」两个设计直接冲突。拆分降级落地后 `diffBudget=150` 真的切成 3 片且调用方/定义方分离，故把断言从「扇出与跨片能力分两条证」升级为直证验证点的单条用例 |
+| 2026-10-10 | M6 | 状态流转 M6 只接到 `AGGREGATING`，不接 `PUBLISHED`（设计审查清单第 5 项写到 PUBLISHED） | `PUBLISHED` 的唯一入口是回写 PR，属 ROADMAP M7。M6 内推到 PUBLISHED 会让它变成无实际含义的状态，M7 还得回来改（用户在判定门确认） |
+| 2026-10-10 | M6 | 里程碑验证点用「确定性 stub + 真实 LLM」双轨断言 | 强断言（file / category / message 关键词）交给按 prompt 内容作答的 stub，确保可重复；真实 LLM 只做宽松检查（措辞不稳定）。stub 的触发条件要求两条证据分别来自不同切片的 summary，变更地图单独给不出第二条，故断言证明的是「信息真的流到了归约会话」而非「桩会说话」。沿用 M4「畸形输出用 stub、happy-path 用真实 LLM」的既有做法（用户在判定门选此项） |
+| 2026-10-10 | M6 | `ChunkSummary` 按 `chunkId` 关联在 `ReviewTask` 上，而非塞进 `ReviewChunk` 值对象（ARCHITECTURE 4 原图画在后者下） | 切片是规划阶段产物、摘要是评审阶段产物。塞进值对象就得为挂摘要重建整个切片，还要动 `review_chunk` 表结构；按 chunkId 关联信息等价、改动面小。ARCHITECTURE 4 与 6.4 已同步 |
+| 2026-10-10 | M6 | `BuildChangeMap` 排在 `PlanChunks` 之前（ARCHITECTURE 5 原图为之后） | 两者无数据依赖（地图要全量文件列表与签名，与切片结果无关）。地图先行可保证任何子会话启动前它已落进共享状态，省掉一次顺序约束。ARCHITECTURE 5 已同步 |
+| 2026-10-10 | M6 | 本机 `docker.exe` 对当前账号执行不了，容器只能由用户手工启动 | Git Bash 与 cmd 均报「拒绝访问」，而 NTFS ACL 正常（完全控制）、非重解析点、无 `docker-users` 组、TCP 2375 未暴露。疑与 PATH 里 `C:\Program Files\YunShu\utils`（云枢终端管控）有关。另：宿主机原生 PG 服务 `postgresql-x64-16` 占 5432，与容器冲突，征兆是 IT 报「用户 codemind 密码认证失败」，需先 `net stop` |
 
 ## 环境与常用命令
 

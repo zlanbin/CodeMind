@@ -116,9 +116,7 @@ final class JavaMethodIndex {
     }
 
     private String qualifiedName(CallableDeclaration<?> callable) {
-        String method = callable.getNameAsString();
-        Optional<TypeDeclaration> type = callable.findAncestor(TypeDeclaration.class);
-        return type.map(t -> t.getNameAsString() + "#" + method).orElse(method);
+        return MethodSignatures.qualifiedName(callable);
     }
 
     /** 一个方法/构造器的行号区间。 */

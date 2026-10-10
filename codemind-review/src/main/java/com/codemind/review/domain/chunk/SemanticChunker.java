@@ -1,5 +1,8 @@
 package com.codemind.review.domain.chunk;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -15,15 +18,19 @@ import java.util.Set;
  * <ul>
  *   <li>Java 文件按方法边界切——同一方法的所有 hunk 落在同一片，<b>方法不被截断</b>；
  *       无法解析的 Java / 非 Java 文件按 hunk 降级（ARCHITECTURE 1.2）。</li>
- *   <li>有调用关系的变更合进同一片（跨文件也合）。</li>
+ *   <li>有调用关系的变更合进同一片（跨文件也合）——这是软约束，整体超预算时让位，
+ *       沿合并缝拆回原子单元（ARCHITECTURE 6.3 降级链最后一步）。</li>
  *   <li>按 diff token 预算装箱，每片不超 {@link ChunkBudget#diffBudget()}；
- *       单个 unit 本身超预算时整片输出并置 {@code oversized}，不截断、不丢弃。</li>
+ *       <b>单个原子单元</b>（一个完整方法）本身超预算时整片输出并置 {@code oversized}，
+ *       不截断、不丢弃。</li>
  * </ul>
  *
  * <p>Java 方法边界需要文件完整源码（new 侧）。源码由调用方提供（拉文件内容是 integration 的职责，
  * ARCHITECTURE 3.3），domain 层只做纯算法。未提供源码或解析失败则对该文件降级为 hunk 切片。
  */
 public final class SemanticChunker {
+
+    private static final Logger log = LoggerFactory.getLogger(SemanticChunker.class);
 
     private final TokenEstimator tokenEstimator;
     private final JavaMethodIndex methodIndex = new JavaMethodIndex();
@@ -56,7 +63,7 @@ public final class SemanticChunker {
         }
 
         mergeByCallRelationship(units);
-        return packIntoChunks(units, budget);
+        return packIntoChunks(splitOversizedUnits(units, budget), budget);
     }
 
     /** 把一个文件切成若干 unit（方法级或 hunk 级降级）。 */
@@ -114,7 +121,8 @@ public final class SemanticChunker {
 
     private boolean referencesAny(String text, Set<String> methodNames) {
         for (String qualified : methodNames) {
-            String simple = qualified.contains("#") ? qualified.substring(qualified.indexOf('#') + 1) : qualified;
+            // 限定名自 M6 起带参数类型（OrderService#cancel(int)），按调用形态匹配只取裸方法名
+            String simple = MethodSignatures.simpleMethodName(qualified);
             if (simple.isBlank()) {
                 continue;
             }
@@ -124,6 +132,32 @@ public final class SemanticChunker {
             }
         }
         return false;
+    }
+
+    /**
+     * 超预算降级的最后一步「拆分 chunk」（ARCHITECTURE 6.3）：聚合出来的 unit 若整体超 diff 预算，
+     * 沿合并缝拆回原子单元，让装箱有机会把它们分到不同片。
+     *
+     * <p>只拆聚合关系，不拆方法——单个原子单元自己超预算时原样留下，由装箱标 {@code oversized}。
+     * 代价是牺牲「有调用关系的变更在同一片」这条软约束；跨片关联改由 M6 的 GlobalReduce 兜
+     * （它只读各片摘要，正是为这种情况准备的）。
+     */
+    private List<Unit> splitOversizedUnits(List<Unit> units, ChunkBudget budget) {
+        int diffBudget = budget.diffBudget();
+        List<Unit> result = new ArrayList<>();
+        for (Unit unit : units) {
+            int tokens = tokenEstimator.estimate(unit.render());
+            if (tokens <= diffBudget || !unit.isSplittable()) {
+                result.add(unit);
+                continue;
+            }
+            List<Unit> parts = unit.constituents();
+            log.info("聚合单元超 diff 预算（{} > {}），沿合并缝拆回 {} 个原子单元：{}",
+                    tokens, diffBudget, parts.size(), unit.filePaths());
+            // 拆出来的原子单元可能仍需再拆（递归展开已在 constituents 完成，此处直接摊平）
+            result.addAll(parts);
+        }
+        return result;
     }
 
     /** 贪心装箱：按 diff token 预算把 unit 填进 chunk，超预算的 unit 独占一片并标记 oversized。 */

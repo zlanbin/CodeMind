@@ -88,4 +88,70 @@ class ChunkReduceNodeTest {
         assertThrows(IllegalStateException.class, () -> node.execute(context),
                 "上游节点未完成应抛异常");
     }
+
+    // ---------- M6：多维度摘要合并与完整性校验 ----------
+
+    @Test
+    void mergesSummariesFromAllDimensions() throws DagExecutionException {
+        // 各维度看的是同一份 diff，符号本应一致；取并集以容忍某个维度漏写
+        ChunkSummary styleSummary = ChunkSummary.of("chunk-1",
+                List.of("RefundClient#submitRefund(long, int)"), "票据号改成 long",
+                List.of("命名含义变了"), List.of());
+        ChunkSummary securitySummary = ChunkSummary.of("chunk-1",
+                List.of("RefundClient#submitRefund(long, int)", "RefundClient#send(long, int)"),
+                "票据号参数类型变更", List.of("无输入校验"),
+                List.of("调用方是否已同步改为 long？"));
+
+        NodeContext context = NodeContext.initial("task-1")
+                .withCompletedResult("n1", AgentReview.success(List.of(), styleSummary, 1))
+                .withCompletedResult("n2", AgentReview.success(List.of(), securitySummary, 1));
+
+        ChunkReduceResult result =
+                new ChunkReduceNode("reduce-1", "chunk-1", List.of("n1", "n2")).execute(context);
+
+        ChunkSummary merged = result.summary();
+        assertNotNull(merged);
+        assertTrue(merged.isComplete());
+        assertEquals(2, merged.changedSymbols().size(), "符号取并集");
+        assertTrue(merged.changedSymbols().contains("RefundClient#send(long, int)"));
+        assertEquals("票据号改成 long", merged.intent(), "intent 取第一个非空");
+        assertEquals(2, merged.risks().size());
+        assertTrue(merged.crossChunkQuestions().contains("调用方是否已同步改为 long？"));
+        assertFalse(result.hasDegradation());
+    }
+
+    @Test
+    void recordsDegradationWhenMergedSummaryIncomplete() throws DagExecutionException {
+        // 所有维度的摘要都降级 → 合并后不可用，必须记入 degradations，
+        // 否则 GlobalReduce 会因为摘要为空而静默失效
+        NodeContext context = NodeContext.initial("task-1")
+                .withCompletedResult("n1",
+                        AgentReview.success(List.of(), ChunkSummary.degraded("chunk-1", "模型没给 summary"), 1))
+                .withCompletedResult("n2",
+                        AgentReview.success(List.of(), ChunkSummary.degraded("chunk-1", "summary 字段缺失"), 1));
+
+        ChunkReduceResult result =
+                new ChunkReduceNode("reduce-1", "chunk-1", List.of("n1", "n2")).execute(context);
+
+        assertNotNull(result.summary());
+        assertTrue(result.summary().degraded());
+        assertFalse(result.summary().isComplete());
+        assertTrue(result.hasDegradation());
+        assertTrue(result.degradations().stream().anyMatch(d -> d.contains("摘要不完整")),
+                "摘要不完整要显式记录，实际: " + result.degradations());
+    }
+
+    @Test
+    void summaryIsNullWhenNoDimensionProducedOne() throws DagExecutionException {
+        // M5 路径：Agent 不产出摘要
+        NodeContext context = NodeContext.initial("task-1")
+                .withCompletedResult("n1", AgentReview.success(List.of(), 1))
+                .withCompletedResult("n2", AgentReview.success(List.of(), 1));
+
+        ChunkReduceResult result =
+                new ChunkReduceNode("reduce-1", "chunk-1", List.of("n1", "n2")).execute(context);
+
+        assertFalse(result.hasSummary());
+        assertFalse(result.hasDegradation(), "没有摘要不等于降级（M5 行为）");
+    }
 }
