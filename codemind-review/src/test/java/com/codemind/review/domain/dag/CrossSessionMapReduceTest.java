@@ -438,6 +438,16 @@ class CrossSessionMapReduceTest {
         }
 
         @Override
+        public java.util.List<String> findStaleInProgress(java.time.Duration idleFor) {
+            return java.util.List.of();
+        }
+
+        @Override
+        public boolean claimForRecovery(String taskId) {
+            return false;
+        }
+
+        @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
             statusHistory.add(status);
         }

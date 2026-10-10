@@ -50,6 +50,12 @@ codemind:
     node-retries: ${CODEMIND_DAG_NODE_RETRIES:1}
     # 单片 diff 的 token 上限；0 表示用默认（总预算 128k × 30%）
     diff-budget: ${CODEMIND_DIFF_BUDGET:0}
+  recovery:
+    # 默认关：开着会让所有 IT 的上下文里多一个定时任务扫库。真实运行与演示必须设为 true
+    enabled: ${CODEMIND_RECOVERY_ENABLED:false}
+    # 空闲多久算卡死。REVIEWING 阶段几十个 LLM 调用期间任务状态不变，阈值要给足
+    idle-threshold: ${CODEMIND_RECOVERY_IDLE_THRESHOLD:15m}
+    scan-interval: ${CODEMIND_RECOVERY_SCAN_INTERVAL:5m}
 
 management:
   endpoints:

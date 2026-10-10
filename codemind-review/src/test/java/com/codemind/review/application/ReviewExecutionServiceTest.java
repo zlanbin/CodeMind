@@ -209,6 +209,16 @@ class ReviewExecutionServiceTest {
         }
 
         @Override
+        public List<String> findStaleInProgress(Duration idleFor) {
+            return List.of();
+        }
+
+        @Override
+        public boolean claimForRecovery(String taskId) {
+            return false;
+        }
+
+        @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
             statusHistory.add(status);
         }
