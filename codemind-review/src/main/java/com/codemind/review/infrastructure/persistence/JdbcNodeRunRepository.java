@@ -23,9 +23,13 @@ public class JdbcNodeRunRepository implements NodeRunRepository {
     private final JdbcClient jdbcClient;
     private final ObjectMapper objectMapper;
 
-    public JdbcNodeRunRepository(JdbcClient jdbcClient, ObjectMapper objectMapper) {
+    /**
+     * checkpoint 用自带类型信息的私有 mapper，不注入容器里那个共享的：
+     * 共享 mapper 读回来是 LinkedHashMap，跨阶段转型会失败（见 {@link CheckpointObjectMapperFactory}）。
+     */
+    public JdbcNodeRunRepository(JdbcClient jdbcClient) {
         this.jdbcClient = jdbcClient;
-        this.objectMapper = objectMapper;
+        this.objectMapper = CheckpointObjectMapperFactory.create();
     }
 
     @Override
@@ -109,7 +113,7 @@ public class JdbcNodeRunRepository implements NodeRunRepository {
             return null;
         }
         try {
-            // 反序列化为 Object（调用方需按具体类型转换）
+            // 类型信息嵌在 JSON 里（见 CheckpointObjectMapperFactory），按原类型还原
             return objectMapper.readValue(json, Object.class);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("节点结果反序列化失败: " + e.getMessage(), e);

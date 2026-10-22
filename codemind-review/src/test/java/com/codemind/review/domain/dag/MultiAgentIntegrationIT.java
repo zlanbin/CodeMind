@@ -19,11 +19,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * M5 集成测试：真实 Spring 容器 + 真实 LLM（可选），验证多 Agent 并行 + 去重完整流程。
  */
+// 不要在这里覆盖 spring.ai.openai.api-key：application.yml 已是
+// ${CODEMIND_LLM_API_KEY:placeholder-no-key}，没 key 时自动落占位值、上下文照样能起。
+// 硬写占位值会把环境变量里的真 key 盖掉，而 hasRealKey() 读的是 System.getenv——
+// 它看得见真 key 所以不跳过，于是每次调用 401、降级成空结果、断言失败（M5/M6 的既有缺陷）。
 @SpringBootTest
-@TestPropertySource(properties = {
-        "spring.cloud.nacos.discovery.enabled=false",
-        "spring.ai.openai.api-key=placeholder-no-key"
-})
+@TestPropertySource(properties = "spring.cloud.nacos.discovery.enabled=false")
 class MultiAgentIntegrationIT {
 
     @Autowired

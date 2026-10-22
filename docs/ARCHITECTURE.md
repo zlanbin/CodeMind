@@ -87,7 +87,17 @@ com.codemind.<service>
 
 ### 3.3 服务间通信
 
-同步（OpenFeign）：review → memory（召回记忆）、review → rule（查规则）、review → integration（拉文件内容）
+同步（OpenFeign）：review → memory（召回记忆）、review → rule（查规则）、review → integration（拉 diff 与文件内容）
+
+review → integration 已落地（M7a）：
+- integration 是唯一持有 `GITHUB_TOKEN`、唯一直连 GitHub 的服务（`GithubScmClient`，Spring `RestClient`，
+  只读：`pulls/{n}` 取 `application/vnd.github.v3.diff`，`contents/{path}?ref=` 取 `application/vnd.github.raw`）
+- 经两个 internal 端点对内暴露：`GET /internal/pulls/diff`、`POST /internal/pulls/contents`（批量，单文件失败不拖垮整批）。
+  GitHub 错误 → 502。**端点无鉴权。** 现状有缺口：网关开着 discovery locator（按服务名自动建路由），
+  `/codemind-integration/internal/**` 经网关**可达**，等于把「用 integration 的 token 读仓库」开放给能访问网关的人。
+  网关暴露到本机之外前必须封掉（显式路由排除 `/internal/**` 或服务间鉴权），已记入 PROGRESS 技术债
+- review 侧 domain 定义出站端口 `ScmContentPort`，infrastructure 用 `@FeignClient(name = "codemind-integration")`
+  按服务名经 Nacos 发现。两侧 DTO 各自定义、不跨模块共享
 
 异步（RocketMQ 领域事件）：
 
@@ -117,7 +127,11 @@ ReviewTask (聚合根)
 方法限定名格式：`外层类名#方法名(参数类型, ...)`，如 `OrderService#cancel(int)`。带参数类型是 M6 的
 必要条件——否则无法区分重载，也无法判断跨文件签名是否一致。不含包名、不消解嵌套类同名歧义。
 
-状态机：`CREATED → PLANNING → REVIEWING → AGGREGATING → PUBLISHED`，任一阶段可转 `FAILED`，`FAILED` 可从 checkpoint 恢复回原阶段。
+状态机：`CREATED → PLANNING → REVIEWING → AGGREGATING → PUBLISHED`，任一阶段可转 `FAILED`。
+恢复走 `FAILED → PLANNING` 重跑整条流程，「回到原阶段」靠 DAG checkpoint 实现：`node_run` 里已完成的节点
+直接取结果，不重复调 LLM（M7a 实现；状态本身不记原阶段）。
+
+`chunkId` 只在任务内唯一（`SemanticChunker` 每个任务从 `chunk-0` 编号），`review_chunk` 主键为 `(task_id, chunk_id)`（V4）。
 
 `fingerprint = hash(file + category + normalize(codeSnippet))`，用于去重和增量评审判重。
 
@@ -149,6 +163,21 @@ M6 已落地：`BuildChangeMap → PlanChunks → 4N 个子会话 → N 个 Chun
 `BuildChangeMap` 排在 `PlanChunks` 之前（原图为之后）：两者无数据依赖（地图要的是全量文件列表与签名，
 与切片结果无关），但地图先行可在任何子会话启动前就落进共享状态。diff 解析不单列节点，
 由两个节点各自调用 `DiffParser`（纯函数，无副作用）。
+
+M7a 接上入口链路（此前 DAG 只在测试里被调用）：`PullRequestReceivedListener` 建完任务后
+`ReviewExecutionService.submitAsync(taskId)` 投给虚拟线程池（MQ 消费线程不被 LLM 阻塞，评审失败不触发重投）→
+`executeReview`：只接 `CREATED` / `FAILED` 状态 → 经 `ScmContentPort` 拉 diff 与 head 侧 Java 源码
+（跳过删除文件、重命名用 newPath、非 Java 不拉）→ `executeCrossSessionReview`。任何异常落 `FAILED`。
+
+卡死恢复（M7a）：进程中途死掉的任务停在 `PLANNING / REVIEWING / AGGREGATING`。`StaleTaskRecoveryService`
+定时扫「`updated_at` 与该任务最新 `node_run` 活动**两者都**早于阈值（默认 15m）」的任务，单条 SQL 原子抢占
+（置 `FAILED`，多实例只有一个抢到）后重提。默认关（`CODEMIND_RECOVERY_ENABLED`）。判定是启发式的，
+真慢的任务会被重启一次，代价由 checkpoint 兜住；更准的节点级心跳未做。
+
+Checkpoint 序列化：节点结果以 `Object` 存取，用开了 default typing（`EVERYTHING`，record 是 final 类）的
+**私有** `ObjectMapper` 把具体类型写进 JSON，类型白名单只放 `com.codemind.` 与 `java.util.`。
+它**不能**注册成 Spring bean，否则 Boot 的 Jackson 自动配置退让、它成为全局 mapper。只序列化 record 组件，
+派生的 `isXxx()` 不进 JSON。
 
 ### 5.1 DAG 引擎范围
 
@@ -258,3 +287,4 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 | PG + pgvector 而非独立向量库 | 少一个组件，单人可运维，数据量级足够 |
 | 服务控制在 5+1 个 | 单人可完成，边界讲得清 |
 | GlobalReduce 只读摘要 | 控制上下文规模，摘要质量通过标注 PR 集合评估 |
+| 只有 integration 直连 GitHub，review 经 internal 端点取内容 | GitHub Token 只在一个服务里；review 不感知 SCM 平台，换 GitLab 只动 integration |

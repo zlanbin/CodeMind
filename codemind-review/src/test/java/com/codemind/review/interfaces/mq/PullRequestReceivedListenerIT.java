@@ -53,8 +53,14 @@ class PullRequestReceivedListenerIT {
                 .update();
     }
 
+    /**
+     * M1 原先还断言状态为 {@code CREATED}，M7a 起不再断言：建完任务就异步触发评审
+     * （{@code ReviewExecutionService.submitAsync}），状态会立刻往前走——integration 可达时
+     * 是 {@code PLANNING} 及之后，不可达时是 {@code FAILED}。本 IT 要验的是「落一行且身份正确」，
+     * 状态流转由 {@code CrossSessionMapReduceTest} 与 {@code RealPullRequestReviewIT} 覆盖。
+     */
     @Test
-    void 收到事件后落一条CREATED任务() throws Exception {
+    void 收到事件后落一条任务且身份字段正确() throws Exception {
         send(PullRequestReceived.of("delivery-" + UUID.randomUUID(), "opened",
                 repo, 7, "headsha", "basesha"));
 
@@ -62,7 +68,8 @@ class PullRequestReceivedListenerIT {
                 .pollInterval(Duration.ofMillis(300))
                 .untilAsserted(() -> assertThat(countRows()).isEqualTo(1));
 
-        assertThat(statusOf()).isEqualTo("CREATED");
+        assertThat(prNumberOf()).isEqualTo(7);
+        assertThat(headShaOf()).isEqualTo("headsha");
     }
 
     @Test
@@ -108,8 +115,15 @@ class PullRequestReceivedListenerIT {
                 .single();
     }
 
-    private String statusOf() {
-        return jdbcClient.sql("select status from review_task where repo = :repo")
+    private int prNumberOf() {
+        return jdbcClient.sql("select pr_number from review_task where repo = :repo")
+                .param("repo", repo)
+                .query(Integer.class)
+                .single();
+    }
+
+    private String headShaOf() {
+        return jdbcClient.sql("select head_sha from review_task where repo = :repo")
                 .param("repo", repo)
                 .query(String.class)
                 .single();

@@ -38,11 +38,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>确定性断言在 {@link CrossSessionMapReduceTest} 与 {@link GlobalReduceNodeTest}；
  * 本 IT 对真实模型只做宽松检查（模型措辞不稳定），无真实 key 时按既有惯例 {@code assumeTrue} 跳过。
  */
+// 不覆盖 spring.ai.openai.api-key，原因同 MultiAgentIntegrationIT（覆盖会盖掉真 key → 401 → 断言失败）
 @SpringBootTest
-@TestPropertySource(properties = {
-        "spring.cloud.nacos.discovery.enabled=false",
-        "spring.ai.openai.api-key=placeholder-no-key"
-})
+@TestPropertySource(properties = "spring.cloud.nacos.discovery.enabled=false")
 class CrossSessionMapReduceIT {
 
     @Autowired
@@ -67,11 +65,14 @@ class CrossSessionMapReduceIT {
     void crossSessionMapReduceWithRealLlm() throws Exception {
         assumeTrue(hasRealKey(), "未设置真实 CODEMIND_LLM_API_KEY，跳过真实 LLM 跨会话 IT");
 
+        // sourceEventId 必须是合法 UUID：JdbcReviewTaskRepository 对它做 UUID.fromString
         ReviewTask task = ReviewTask.create(
-                "codemind/m6-it-" + java.util.UUID.randomUUID(), 1, "head-m6", "base-m6", "evt-m6");
+                "codemind/m6-it-" + java.util.UUID.randomUUID(), 1, "head-m6", "base-m6",
+                java.util.UUID.randomUUID().toString());
         assertTrue(taskRepository.insertIfAbsent(task), "任务应插入成功");
 
-        DagScheduler scheduler = new DagScheduler(nodeRunRepository, Duration.ofSeconds(90), 1);
+        // 中转端点延迟波动大，实测轻量的 build-change-map 也可能超过 90s；真实 LLM IT 给足余量
+        DagScheduler scheduler = new DagScheduler(nodeRunRepository, Duration.ofSeconds(240), 1);
         DagOrchestrator orchestrator =
                 new DagOrchestrator(scheduler, reviewAgents, globalReduceAgent, taskRepository);
 

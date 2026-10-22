@@ -31,6 +31,11 @@ codemind:
   mq:
     topic:
       pull-request-received: codemind-pull-request-received
+  scm:
+    # 访问令牌只从环境变量注入，不写入仓库。空串为匿名（只能读公开仓库，限流很低）
+    github-token: ${GITHUB_TOKEN:}
+    github-api-base-url: ${GITHUB_API_BASE_URL:https://api.github.com}
+    request-timeout: 20s
 
 management:
   endpoints:

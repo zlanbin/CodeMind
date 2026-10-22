@@ -433,6 +433,21 @@ class CrossSessionMapReduceTest {
         }
 
         @Override
+        public Optional<ReviewTask> findById(String taskId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public java.util.List<String> findStaleInProgress(java.time.Duration idleFor) {
+            return java.util.List.of();
+        }
+
+        @Override
+        public boolean claimForRecovery(String taskId) {
+            return false;
+        }
+
+        @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
             statusHistory.add(status);
         }

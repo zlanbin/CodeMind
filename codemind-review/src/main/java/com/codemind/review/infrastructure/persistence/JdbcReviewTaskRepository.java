@@ -8,6 +8,10 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -28,6 +32,36 @@ public class JdbcReviewTaskRepository implements ReviewTaskRepository {
             select task_id, repo, pr_number, head_sha, base_sha, source_event_id, status, created_at
             from review_task
             where repo = :repo and pr_number = :prNumber and head_sha = :headSha
+            """;
+
+    private static final String IN_PROGRESS_STATUSES = "('PLANNING', 'REVIEWING', 'AGGREGATING')";
+
+    /**
+     * 卡死判定：任务自身 updated_at 早于截止时间，<b>且</b>它名下节点的最后活动时间也早于截止
+     * （没有节点记录的只看 updated_at）。两个条件都要，因为 updated_at 只在阶段切换时刷新，
+     * 而 REVIEWING 阶段几十个 LLM 调用期间它一直不动——只看它会把正在跑的任务误判成卡死。
+     */
+    private static final String SELECT_STALE_SQL = """
+            select t.task_id
+            from review_task t
+            where t.status in """ + IN_PROGRESS_STATUSES + """
+                  and t.updated_at < :cutoff
+                  and coalesce(
+                        (select max(coalesce(n.completed_at, n.started_at))
+                         from node_run n where n.task_id = cast(t.task_id as varchar)),
+                        t.updated_at) < :cutoff
+            """;
+
+    /** 原子抢占：状态仍在进行中才改得动，多实例同时扫只有一个拿到受影响行。 */
+    private static final String CLAIM_SQL = """
+            update review_task
+            set status = 'FAILED', updated_at = now()
+            where task_id = :taskId and status in """ + IN_PROGRESS_STATUSES;
+
+    private static final String SELECT_BY_ID_SQL = """
+            select task_id, repo, pr_number, head_sha, base_sha, source_event_id, status, created_at
+            from review_task
+            where task_id = :taskId
             """;
 
     private final JdbcClient jdbcClient;
@@ -60,6 +94,30 @@ public class JdbcReviewTaskRepository implements ReviewTaskRepository {
                 .param("headSha", headSha)
                 .query(this::mapRow)
                 .optional();
+    }
+
+    @Override
+    public Optional<ReviewTask> findById(String taskId) {
+        return jdbcClient.sql(SELECT_BY_ID_SQL)
+                .param("taskId", UUID.fromString(taskId))
+                .query(this::mapRow)
+                .optional();
+    }
+
+    @Override
+    public List<String> findStaleInProgress(Duration idleFor) {
+        Timestamp cutoff = Timestamp.from(Instant.now().minus(idleFor));
+        return jdbcClient.sql(SELECT_STALE_SQL)
+                .param("cutoff", cutoff)
+                .query(String.class)
+                .list();
+    }
+
+    @Override
+    public boolean claimForRecovery(String taskId) {
+        return jdbcClient.sql(CLAIM_SQL)
+                .param("taskId", UUID.fromString(taskId))
+                .update() > 0;
     }
 
     @Override
