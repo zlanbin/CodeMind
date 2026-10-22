@@ -5,7 +5,6 @@ import com.codemind.review.domain.dag.NodeRunRepository;
 import com.codemind.review.domain.dag.NodeRunStatus;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
@@ -25,13 +24,12 @@ public class JdbcNodeRunRepository implements NodeRunRepository {
     private final ObjectMapper objectMapper;
 
     /**
-     * @param objectMapper 必须是 {@code checkpointObjectMapper}（带类型信息），不是容器里那个共享的。
-     *                     共享 mapper 读回来是 LinkedHashMap，跨阶段转型会失败。
+     * checkpoint 用自带类型信息的私有 mapper，不注入容器里那个共享的：
+     * 共享 mapper 读回来是 LinkedHashMap，跨阶段转型会失败（见 {@link CheckpointObjectMapperFactory}）。
      */
-    public JdbcNodeRunRepository(JdbcClient jdbcClient,
-                                 @Qualifier("checkpointObjectMapper") ObjectMapper objectMapper) {
+    public JdbcNodeRunRepository(JdbcClient jdbcClient) {
         this.jdbcClient = jdbcClient;
-        this.objectMapper = objectMapper;
+        this.objectMapper = CheckpointObjectMapperFactory.create();
     }
 
     @Override
@@ -115,7 +113,7 @@ public class JdbcNodeRunRepository implements NodeRunRepository {
             return null;
         }
         try {
-            // 类型信息嵌在 JSON 里（见 CheckpointSerializationConfig），按原类型还原
+            // 类型信息嵌在 JSON 里（见 CheckpointObjectMapperFactory），按原类型还原
             return objectMapper.readValue(json, Object.class);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("节点结果反序列化失败: " + e.getMessage(), e);
