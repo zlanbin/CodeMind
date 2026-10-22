@@ -11,9 +11,11 @@ import com.codemind.review.domain.task.ReviewTaskStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.TestPropertySource;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -54,6 +56,9 @@ class RealPullRequestReviewIT {
     @Autowired
     private ScmContentPort scmContentPort;
 
+    @Autowired
+    private JdbcClient jdbcClient;
+
     @Test
     void realPullRequestFlowsThroughToAggregating() {
         String repo = System.getenv("CODEMIND_TEST_REPO");
@@ -77,9 +82,21 @@ class RealPullRequestReviewIT {
         Set<String> filesInDiff = diffFiles.stream().map(DiffFile::path).collect(java.util.stream.Collectors.toSet());
         System.out.println("真实 PR 变更文件: " + filesInDiff);
 
+        // ① 续：Java 文件的新侧源码真拉到了。全部拉失败时评审会降级为 hunk 切片照样跑完，
+        // 不单独断言就证不了「拉到文件源码」这条验证点
+        List<String> javaPaths = ReviewExecutionService.sourcePathsOf(diffFiles);
+        assertFalse(javaPaths.isEmpty(), "测试 PR 应含 Java 文件，否则本 IT 证不了源码拉取: " + filesInDiff);
+        Map<String, String> sources = scmContentPort.fetchNewSources(repo, headSha, javaPaths);
+        for (String path : javaPaths) {
+            assertTrue(sources.containsKey(path) && !sources.get(path).isBlank(),
+                    "Java 文件新侧源码应非空: " + path + "，实际拿到: " + sources.keySet());
+        }
+
+        // 同 (repo, pr, headSha) 唯一：清掉上一轮残留再插。插不进去必须失败而非跳过——
+        // 跳过会让本 IT 承载的三个验证点被静默绕过（S6 评审）
+        deleteExistingTasks(repo, pr, headSha);
         ReviewTask task = ReviewTask.create(repo, pr, headSha, "base-unused", java.util.UUID.randomUUID().toString());
-        assumeTrue(taskRepository.insertIfAbsent(task),
-                "同 (repo, pr, headSha) 的任务已存在，换 headSha 或清理 review_task 后重跑");
+        assertTrue(taskRepository.insertIfAbsent(task), "清理后仍插不进 review_task，检查唯一索引或清理逻辑");
 
         CrossSessionReviewResult result = reviewExecutionService.executeReview(task.taskId());
 
@@ -108,6 +125,20 @@ class RealPullRequestReviewIT {
         }
 
         System.out.println("降级信息: " + result.allDegradations());
+    }
+
+    /** 按子表 → 主表的顺序删（review_chunk 外键指向 review_task；node_run 的 task_id 是 varchar 无外键）。 */
+    private void deleteExistingTasks(String repo, int pr, String headSha) {
+        jdbcClient.sql("""
+                delete from node_run where task_id in (select cast(task_id as varchar) from review_task
+                    where repo = :repo and pr_number = :pr and head_sha = :sha)
+                """).param("repo", repo).param("pr", pr).param("sha", headSha).update();
+        jdbcClient.sql("""
+                delete from review_chunk where task_id in (select task_id from review_task
+                    where repo = :repo and pr_number = :pr and head_sha = :sha)
+                """).param("repo", repo).param("pr", pr).param("sha", headSha).update();
+        jdbcClient.sql("delete from review_task where repo = :repo and pr_number = :pr and head_sha = :sha")
+                .param("repo", repo).param("pr", pr).param("sha", headSha).update();
     }
 
     private static boolean notBlank(String v) {

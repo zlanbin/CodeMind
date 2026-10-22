@@ -101,7 +101,9 @@ git commit -m "M7a: integration 侧 GitHub 读客户端（拉 diff 与文件源�
 - 新建 `codemind-integration/src/main/java/com/codemind/integration/interfaces/web/PullRequestContentController.java`
 - 新建 `codemind-integration/src/main/java/com/codemind/integration/interfaces/web/dto/FileContentsRequest.java`
 - 新建 `codemind-integration/src/main/java/com/codemind/integration/interfaces/web/dto/FileContentsResponse.java`
-- 改 `codemind-integration/src/main/java/com/codemind/integration/interfaces/web/WebhookExceptionHandler.java`（`ScmException` → 502，保留 M1 的 401/400 行为不变）
+- 新建 `codemind-integration/src/main/java/com/codemind/integration/interfaces/web/PullRequestContentExceptionHandler.java`（`ScmException` → 502）。
+  > 实施时偏离：原计划改 `WebhookExceptionHandler`，但它按 `assignableTypes = GithubWebhookController.class` 限定，
+  > 管不到新控制器；放宽范围会让 webhook 的 401/400 映射溢出到新端点。故另建 advice，M1 行为不变
 - 测试 `codemind-integration/src/test/java/com/codemind/integration/application/PullRequestContentServiceTest.java`
 
 **接口：**
@@ -131,7 +133,7 @@ git commit -m "M7a: integration 侧 GitHub 读客户端（拉 diff 与文件源�
 Run: `mvn test -pl codemind-integration -Dtest=PullRequestContentServiceTest`
 Expected: FAIL，`PullRequestContentService` 不存在
 
-- [ ] **步骤 3：实现服务、两个 DTO、控制器，并在 `WebhookExceptionHandler` 加 `ScmException` → 502**
+- [ ] **步骤 3：实现服务、两个 DTO、控制器，并在 `PullRequestContentExceptionHandler` 加 `ScmException` → 502**
 
 控制器只做参数转发与 DTO 包装，不含业务判断。两个 DTO 用 record。
 
@@ -377,7 +379,9 @@ git commit -m "M7a: DAG 装配成 bean，建任务后异步触发评审"
 // 断言：① 真实拉到的 diff 非空且含 "diff --git"
 //       ② chunkResults 非空
 //       ③ task.status() == AGGREGATING
-//       ④ task.findings() 非空（真实 LLM 至少给一条意见）
+//       ④ result.allFindings() 非空（真实 LLM 至少给一条意见）
+//          实施时偏离：原写 task.findings()，但本地 task 是插库前的实例，executeReview 按 taskId
+//          重建了另一个聚合；编排器挂到聚合上的正是 allFindings()。③ 的状态同理改为查库
 //       ⑤ 每条 Finding 的 file 都在 diff 的文件列表里（防 LLM 编造文件名 —— M7b 回写靠这个字段定位）
 // 打印全部 Finding 的 file:line / severity / message，供人工核对行号是否落在 diff 范围内
 ```

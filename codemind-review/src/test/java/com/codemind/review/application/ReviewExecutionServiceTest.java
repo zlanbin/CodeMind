@@ -46,12 +46,33 @@ class ReviewExecutionServiceTest {
         assertEquals(List.of("Kept.java"), paths, "删除的文件没有新侧，不能去拉");
     }
 
+    /**
+     * 走真实 {@link DiffParser}：只验 sourcePathsOf 不够，要证明解析器从 GitHub 的重命名 diff
+     * 里取出的就是新路径（S6 评审：原用例手工构造 DiffFile，绕过了解析）。
+     * 含纯重命名（similarity 100%，无 hunk、无 ---/+++ 头）——它只有 rename from/to 两行可依。
+     */
     @Test
     void usesNewPathForRenamedFiles() {
-        List<String> paths = ReviewExecutionService.sourcePathsOf(List.of(
-                diffFile("Old.java", "New.java", ChangeType.RENAMED)));
+        String diff = """
+                diff --git a/src/Old.java b/src/New.java
+                similarity index 90%
+                rename from src/Old.java
+                rename to src/New.java
+                index 1111111..2222222 100644
+                --- a/src/Old.java
+                +++ b/src/New.java
+                @@ -1,1 +1,1 @@
+                -class Old {}
+                +class New {}
+                diff --git a/src/Moved.java b/pkg/Moved.java
+                similarity index 100%
+                rename from src/Moved.java
+                rename to pkg/Moved.java
+                """;
 
-        assertEquals(List.of("New.java"), paths, "重命名要用 newPath，旧路径已不存在");
+        List<String> paths = ReviewExecutionService.sourcePathsOf(new DiffParser().parse(diff));
+
+        assertEquals(List.of("src/New.java", "pkg/Moved.java"), paths, "重命名要用 newPath，旧路径已不存在");
     }
 
     @Test

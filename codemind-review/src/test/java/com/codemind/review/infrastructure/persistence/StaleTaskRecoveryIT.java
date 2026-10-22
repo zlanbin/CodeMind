@@ -68,6 +68,32 @@ class StaleTaskRecoveryIT {
         assertThat(stale).doesNotContain(taskId);
     }
 
+    /**
+     * 「两者都早于阈值」的另一半：节点活动很旧，但任务状态刚推进过（比如刚从 PLANNING 进 REVIEWING，
+     * 下一个节点还没落 started_at）。只看 node_run 就会误判（S6 评审补）。
+     */
+    @Test
+    void 状态刚推进过的任务即使节点活动很旧也不算卡死() {
+        String taskId = insertTask(ReviewTaskStatus.REVIEWING);
+        insertCompletedNode(taskId, 30);
+
+        List<String> stale = repository.findStaleInProgress(Duration.ofMinutes(15));
+
+        assertThat(stale).doesNotContain(taskId);
+    }
+
+    /** 两侧都旧才判卡死：防止 node_run 的 join 写错后把有节点记录的任务一律排除。 */
+    @Test
+    void 状态与节点活动都旧的任务被捞到() {
+        String taskId = insertTask(ReviewTaskStatus.REVIEWING);
+        backdateTask(taskId, 30);
+        insertCompletedNode(taskId, 30);
+
+        List<String> stale = repository.findStaleInProgress(Duration.ofMinutes(15));
+
+        assertThat(stale).contains(taskId);
+    }
+
     @Test
     void 终态与CREATED任务不被捞到() {
         String published = insertTask(ReviewTaskStatus.PUBLISHED);
@@ -125,6 +151,18 @@ class StaleTaskRecoveryIT {
                 """)
                 .param("runId", UUID.randomUUID())
                 .param("taskId", taskId)
+                .update();
+    }
+
+    private void insertCompletedNode(String taskId, int minutesAgo) {
+        jdbcClient.sql("""
+                insert into node_run (run_id, task_id, node_id, status, started_at, completed_at)
+                values (:runId, :taskId, 'plan-chunks', 'COMPLETED',
+                        now() - make_interval(mins => :minutes + 1), now() - make_interval(mins => :minutes))
+                """)
+                .param("runId", UUID.randomUUID())
+                .param("taskId", taskId)
+                .param("minutes", minutesAgo)
                 .update();
     }
 }
