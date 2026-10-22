@@ -63,6 +63,23 @@ class GithubScmClientTest {
         server.verify();
     }
 
+    /**
+     * 路径与 ref 按 URI 规则编码：Git 允许文件名带空格、{@code #}、{@code ?}，
+     * 原样拼进 URI 会被截成 fragment / query，拉到错的文件或 404（S6 评审发现）。
+     * 目录分隔的 {@code /} 保留，否则 GitHub 认不出层级；query 里的 {@code /} 本就合法，不编。
+     */
+    @Test
+    void pathAndRefAreEncodedButSlashesKept() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/contents/src/My%20Dir/A%23B.java?ref=feat/x%23y"))
+                .andRespond(withSuccess("class A {}\n", MediaType.TEXT_PLAIN));
+
+        String actual = client.fetchFileContent("owner/repo", "src/My Dir/A#B.java", "feat/x#y");
+
+        assertEquals("class A {}\n", actual);
+        server.verify();
+    }
+
     @Test
     void notFoundBecomesScmExceptionWith404() {
         GithubScmClient client = clientWithToken(TOKEN);

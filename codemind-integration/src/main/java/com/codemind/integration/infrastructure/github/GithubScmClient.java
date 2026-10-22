@@ -7,8 +7,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.util.UriUtils;
 
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * GitHub REST v3 只读适配器（M7a）。
@@ -32,6 +37,7 @@ public class GithubScmClient implements ScmClient {
     private static final String API_VERSION = "2022-11-28";
 
     private final RestClient restClient;
+    private final String baseUrl;
 
     /**
      * @param builder GitHub 专用的 builder（超时等传输配置已由装配层设好）
@@ -40,8 +46,8 @@ public class GithubScmClient implements ScmClient {
      */
     public GithubScmClient(RestClient.Builder builder, String baseUrl, String token) {
         Objects.requireNonNull(builder, "builder");
+        this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl").replaceAll("/+$", "");
         RestClient.Builder configured = builder
-                .baseUrl(Objects.requireNonNull(baseUrl, "baseUrl"))
                 .defaultHeader("X-GitHub-Api-Version", API_VERSION);
         if (token == null || token.isBlank()) {
             log.warn("未配置 GITHUB_TOKEN，GitHub 调用将以匿名身份发出，只能读公开仓库且限流很低");
@@ -53,20 +59,31 @@ public class GithubScmClient implements ScmClient {
 
     @Override
     public String fetchPullRequestDiff(String repo, int prNumber) {
-        String uri = "/repos/%s/pulls/%d".formatted(repo, prNumber);
+        URI uri = URI.create("%s/repos/%s/pulls/%d".formatted(baseUrl, encodePath(repo), prNumber));
         return get(uri, DIFF_MEDIA_TYPE, "%s PR #%d 的 diff".formatted(repo, prNumber));
     }
 
     @Override
     public String fetchFileContent(String repo, String path, String ref) {
-        String uri = "/repos/%s/contents/%s?ref=%s".formatted(repo, path, ref);
+        URI uri = URI.create("%s/repos/%s/contents/%s?ref=%s".formatted(baseUrl, encodePath(repo),
+                encodePath(path), UriUtils.encodeQueryParam(ref, StandardCharsets.UTF_8)));
         return get(uri, RAW_MEDIA_TYPE, "%s 的文件 %s@%s".formatted(repo, path, ref));
+    }
+
+    /**
+     * 逐段编码、保留 {@code /}：Git 文件名可含空格、{@code #}、{@code ?}，原样拼进 URI 会被截成
+     * fragment / query。编好后以 {@link URI} 传给 RestClient，它不会再编一遍。
+     */
+    private static String encodePath(String path) {
+        return Arrays.stream(path.split("/", -1))
+                .map(segment -> UriUtils.encodePathSegment(segment, StandardCharsets.UTF_8))
+                .collect(Collectors.joining("/"));
     }
 
     /**
      * @param target 出错时写进异常 message 的人类可读目标描述（含仓库与路径，便于排查）
      */
-    private String get(String uri, String acceptMediaType, String target) {
+    private String get(URI uri, String acceptMediaType, String target) {
         try {
             String body = restClient.get()
                     .uri(uri)
