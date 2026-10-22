@@ -88,11 +88,14 @@ class RealPullRequestReviewIT {
         assertFalse(result.chunkResults().isEmpty(), "应至少切出一片");
         System.out.println("切片数: " + result.chunkResults().size());
 
-        // ③ 状态推进到 AGGREGATING（PUBLISHED 属 M7b）
-        assertEquals(ReviewTaskStatus.AGGREGATING, task.status());
+        // ③ 状态推进到 AGGREGATING（PUBLISHED 属 M7b）。
+        // 本地 task 是插库前的那个实例，executeReview 按 taskId findById 重建了另一个聚合，
+        // 本地这个永远停在 CREATED——状态以库为准
+        assertEquals(ReviewTaskStatus.AGGREGATING,
+                taskRepository.findById(task.taskId()).orElseThrow().status());
 
-        // ④ 真实 LLM 至少给一条意见
-        List<Finding> findings = task.findings();
+        // ④ 真实 LLM 至少给一条意见（编排器挂到聚合上的就是 allFindings()，Finding 尚未落库）
+        List<Finding> findings = result.allFindings();
         assertFalse(findings.isEmpty(), "真实 LLM 应至少产出一条 Finding");
 
         // ⑤ Finding 的 file 必须落在真实 diff 的文件列表内（M7b 回写靠这个字段定位）

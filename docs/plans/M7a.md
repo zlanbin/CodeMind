@@ -509,7 +509,7 @@ git commit -m "M7a: 卡死任务恢复驱动（扫表 + 原子抢占 + 从 check
 
 ## 已知不做（留 M7b 或更后）
 
-- 回写 PR、`ReviewReport`、`PUBLISHED`、回写幂等表（V4）、噪声阈值 —— 全部 M7b
+- 回写 PR、`ReviewReport`、`PUBLISHED`、回写幂等表（V5；V4 已被 M7a 的 `review_chunk` 主键修复占用）、噪声阈值 —— 全部 M7b
 - 恢复驱动默认关（`CODEMIND_RECOVERY_ENABLED=false`），真实运行要显式开，M13 演示脚本需带上
 - 恢复的判定是启发式的：15 分钟无任何节点活动即判卡死。真卡了 15 分钟的慢任务会被重启一次，
   但 checkpoint 保证已完成节点不重复调 LLM，代价可控。更准的做法是节点级心跳，M7a 不做
