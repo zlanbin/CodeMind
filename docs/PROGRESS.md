@@ -5,48 +5,63 @@
 
 ## 当前状态
 
-- 当前里程碑：**M6 已完成**（验证点：超预算 PR 切成多片、调用方与定义方分落不同片、GlobalReduce
-  只凭各片摘要发现跨文件签名不一致）；下一个会话进 M7
-- 上次更新：2026-10-10
+- 当前里程碑：**M7a 已完成**（入口链路：真实 PR 自动拉 diff 与源码 → 跨会话评审 → `AGGREGATING` + Finding）；
+  下一个会话进 **M7b**（回写 PR）
+- 上次更新：2026-10-22
+- 分支：`feat/m7a-entry-chain` 已推送（HEAD `c08a53b`），**未合并 master、未开 PR**
 - 阻塞项：无
-- 未验证项：真实 LLM 的 ChunkSummary 质量（`CrossSessionMapReduceIT` 因无 key 被 `assumeTrue` 跳过）
+- 未验证项：无（M5 / M6 遗留的真实 LLM IT 本次均实跑通过，见 M7a 节）
 
 ## 下一个会话要做的事
 
-**进入 M7：回写 PR（行级评论 + 总结报告）。**
+**进入 M7b：回写 PR（行级评论 + 总结报告 + `PUBLISHED`）。** 开场先决定 M7a 分支是否合并 master（或开 PR）。
 
 验证点（ROADMAP M7）：在自己的 GitHub 仓库提 PR，看到行级评论。
+**这是往外部系统写东西的里程碑**（WORKFLOW.md）：首次真实调用前停下，说清写什么、写到哪个仓库、等用户确认。
+只在 `zlanbin/codemind-sandbox` 上跑，不碰其它仓库。
 
 要做的事：
-1. integration 侧新增 GitHub 回写能力：行级评论（`POST /repos/{owner}/{repo}/pulls/{n}/comments`，
-   需 commit_id + path + line）+ PR 总结评论；Token 走环境变量 `GITHUB_TOKEN`
-2. 评审结果从 review 服务流向 integration：定义领域事件（如 `ReviewCompleted`，放 `codemind-common` 的
-   `event` 包），review 在 AGGREGATING 完成后发布，integration 消费后回写
-3. 状态推进到 `PUBLISHED`（M6 只到 AGGREGATING，`PUBLISHED` 的入口就是回写成功）
-4. `ReviewReport` 值对象（ARCHITECTURE 4 已列，尚未实现）：汇总 Finding 生成总结报告
-5. Finding 的 `line` 落到真实 diff 行：LLM 给的行号可能不在 diff 范围内，GitHub 会拒；
-   需按 hunk 校验并降级为 PR 级评论
-6. 树形递归归约（ARCHITECTURE 6.2 第 4 步，M6 只做一层）：摘要过多时分批归约，阈值待定
+1. integration 侧回写：行级评论（`POST /repos/{owner}/{repo}/pulls/{n}/comments`，需 commit_id + path + line + side）
+   + PR 总结评论（issues comments）。`GithubScmClient` 目前只读，写调用加在同一适配器或另起 `ScmWriter` 端口
+2. 事件 `ReviewCompleted`（放 `codemind-common` 的 `event` 包）：review 在 AGGREGATING 后发布，integration 消费回写，
+   回写成功后状态推进 `PUBLISHED`（回传方式：再一个事件，或 integration 调 review 的 internal 端点，S1 定）
+3. `ReviewReport` 值对象（ARCHITECTURE 4 已列，未实现）：汇总 Finding 生成总结
+4. 行号落到 diff 范围：**实测 GlobalReduce 的 Finding 全是 `line=0`**（跨文件问题没有具体行），片级 Finding 的行号
+   也可能不在 hunk 内。按 hunk 校验，不合法的降级进总结评论
+5. 回写幂等表用 **V5**（V4 已被 M7a 的 `review_chunk` 主键修复占用）：同一 (task, fingerprint) 不重复发评论
+6. 噪声控制：实测 sandbox PR 一次产出 18~25 条，**同一问题被不同维度用不同措辞重复报**（如 `InventoryClient:11`
+   的 null 风险 3 条），fingerprint 按 snippet 判重拦不住。需要阈值 / 同文件同行合并，S1 定规则
+7. 树形递归归约（ARCHITECTURE 6.2 第 4 步）：仍未做，摘要过多时分批归约。可再往后留
 
-先读 ARCHITECTURE 3.3（integration 职责）与 5（DAG 图的 Publish 节点）。
+可直接复用：
+- 评审入口：`ReviewExecutionService.executeReview(String taskId) -> CrossSessionReviewResult`（同步）、
+  `submitAsync(String taskId)`；结果 `allFindings()` / `allDegradations()`
+- 读 GitHub：`ScmClient.fetchPullRequestDiff(repo, pr)` / `fetchFileContent(repo, path, ref)`（integration）；
+  review 侧 `ScmContentPort.fetchDiff` / `fetchNewSources`
+- 端到端 IT 模板：`RealPullRequestReviewIT`（自动清残留，三变量 + 两 key 齐备才跑）
 
-跑验证的前置（已验证可用）：
+跑验证的前置（2026-10-22 实测可用）：
 ```bash
-cd /d/pingshen/deploy && docker compose up -d      # 等 PG / Redis / Nacos healthy
-export CODEMIND_LLM_API_KEY=<中转端点 Claude 分组 key>
+# Docker Desktop 是用户级安装，助手可直接拉起（bash 里 & 启动会随 shell 退出，要走 PowerShell）
+powershell.exe -NoProfile -Command 'Start-Process -FilePath "C:\Users\35229\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe"'
+cd /d/pingshen/deploy && docker compose up -d          # 等 PG / Redis / Nacos healthy
+source ~/.codemind-secrets.env                         # 仓库外，含 GITHUB_TOKEN / CODEMIND_LLM_API_KEY / CODEMIND_TEST_*
+mvn -q package -DskipTests -pl codemind-integration -am
+cp codemind-integration/target/codemind-integration-0.1.0-SNAPSHOT.jar /tmp/codemind-integration-run.jar
+GITHUB_WEBHOOK_SECRET=<任意> java -jar /tmp/codemind-integration-run.jar &   # RealPullRequestReviewIT 直连 8081
 mvn verify
 ```
-注意：`CODEMIND_LLM_API_KEY` 不设时真实 LLM IT 会 `assumeTrue` 跳过，不算验证到。
-安全提醒：key 曾三次贴进聊天记录（M4 两次 + M6 会话），**强烈建议轮换**。
+- 每条命令里 `source` 密钥文件，不要把值贴进对话
+- integration 从 jar **副本**启动：Windows 会锁住正在运行的 jar，挡住 `mvn package` 重打包
+- 改了 integration 代码要重打包并重启它，否则 RealPR IT 测的是旧代码
 
-**本机环境坑（M6 会话实测，下次直接按这个走）：**
-- `docker.exe` 对当前账号**执行不了**（Git Bash、cmd 均「拒绝访问」），而 NTFS ACL 正常、
-  非重解析点、无 `docker-users` 组、TCP 2375 未暴露。疑与 PATH 里的
-  `C:\Program Files\YunShu\utils`（云枢终端管控）有关。**容器只能由用户在受信终端里手工启动**，
-  助手侧只能靠 `netstat` 探 5432/6379/8848/9876 判断是否就绪
-- 宿主机原生 PG 服务 `postgresql-x64-16` 占 5432，与 `codemind-postgres` 容器冲突；
-  征兆是 IT 报「用户 codemind 密码认证失败」（连到了原生 PG）。本会话已 `net stop` 该服务
-- 容器会无故消失（本会话中途 4 个端口同时不再监听，重启 compose 后恢复），verify 失败先探端口
+安全提醒：`GITHUB_TOKEN` 与 LLM key 都进过聊天记录，**强烈建议轮换**。M7b 的 token 需要 `pull_requests: write`，
+只授 sandbox 仓库。
+
+**本机环境坑（2026-10-22 更新）：**
+- ~~`docker.exe` 对当前账号执行不了~~：M6 会话的记载已过时，本会话助手可直接调 `docker`，Docker Desktop 也能由助手拉起（命令见上）
+- 宿主机原生 PG 服务 `postgresql-x64-16` 占 5432 会与容器冲突（征兆「用户 codemind 密码认证失败」）。本会话查时为 STOPPED
+- 容器会无故消失（M6 会话遇到过），verify 失败先探端口 5432/6379/8848/9876
 
 **M6 代码已就绪，可直接复用的东西：**
 - 跨会话全流程入口：`DagOrchestrator.executeCrossSessionReview(buildChangeMapNode, planChunksNode, task, ctx)`
@@ -71,6 +86,76 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M7a 入口链路（真实 PR → 拉 diff 与源码 → 跨会话评审 → AGGREGATING）—— 完成于 2026-10-22
+
+M7 拆成 M7a（本节，只读 GitHub）/ M7b（回写）。计划 `docs/plans/M7a.md` 的 Task 1~8 全部落地。
+本里程碑首次按 `docs/WORKFLOW.md` 九级流程走完，S6 是第一次由不带实现上下文的评审者看代码。
+
+改动范围（integration + review，按任务）：
+
+- integration：`application/port/ScmClient` + `ScmException`（带 statusCode）；`infrastructure/github/GithubScmClient`
+  （RestClient，只读，path/ref 逐段 URI 编码）；`GithubConfig`；`PullRequestContentService`（批量拉，单文件失败跳过）；
+  `PullRequestContentController`（`GET /internal/pulls/diff`、`POST /internal/pulls/contents`）+
+  `PullRequestContentExceptionHandler`（`ScmException` → 502）
+- review：domain 端口 `scm/ScmContentPort` + `ScmContentException`；`infrastructure/scm` 的 Feign 客户端与适配器
+  （加 `spring-cloud-starter-openfeign` + loadbalancer）；`ReviewTaskRepository.findById`；
+  `application/ReviewExecutionService`（`executeReview` / `submitAsync` / `sourcePathsOf`）；
+  `infrastructure/config/ReviewDagConfig`（DAG 全家装配成 bean）；listener 建任务后 `submitAsync`
+- 卡死恢复：`findStaleInProgress` / `claimForRecovery`、`StaleTaskRecoveryService`、
+  `RecoverySchedulingConfig`（`CODEMIND_RECOVERY_ENABLED` 默认关）
+- checkpoint：`infrastructure/persistence/CheckpointObjectMapperFactory`（default typing、非 bean、关 is-getter）
+- `V4__review_chunk_task_scoped_pk.sql`：`review_chunk` 主键 `chunk_id` → `(task_id, chunk_id)`
+
+验证命令与结果（2026-10-22，真实 `GITHUB_TOKEN` + `CODEMIND_LLM_API_KEY`、真实中间件、integration 跑在 8081）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| 真实 PR 能自动拉到 diff 与文件源码 | `RealPullRequestReviewIT` ① | **通过**。`zlanbin/codemind-sandbox` #1（head `6615e4d`）：diff 含 `diff --git`；每个 Java 文件新侧源码非空（S6 后补的断言） |
+| 评审跑到 `AGGREGATING` 并产出 Finding | `RealPullRequestReviewIT` ③④ | **通过**。实跑 33~41s；库里状态 `AGGREGATING`；`allFindings()` 18~25 条（多次运行不等）。预埋缺陷都被抓到：`i <= size()` 越界、`discountPercent / 100` 整除、`stock.get` 改掉 `getOrDefault` 后的 NPE |
+| Finding 的 file 落在真实 diff 文件列表内 | `RealPullRequestReviewIT` ⑤ | **通过**。无编造文件名 |
+| 删除 / 重命名 / 非 Java 文件不误拉内容 | `ReviewExecutionServiceTest`（7 例） | **通过**。重命名用例走真实 `DiffParser`，含 100% 纯重命名 |
+| 新 bean 在真实容器装配正确 | `ReviewDagWiringIT`（2 例） | **通过**。含回归 `sharedObjectMapperWritesPlainJson` |
+| 卡死任务能续跑、正在跑的不被误判 | `StaleTaskRecoveryIT`（6 例）+ `StaleTaskRecoveryServiceTest`（4 例） | **通过**。含 S6 后补的「状态新节点旧不算卡死」「两侧都旧被捞到」 |
+| checkpoint 各类节点结果往返 | `CheckpointObjectMapperFactoryTest`（6 例） | **通过**。修复前 3 例红（`complete` 字段），修复后绿 |
+| GitHub 路径编码 | `GithubScmClientTest.pathAndRefAreEncodedButSlashesKept` | **通过**。修复前红（`#` 被当 fragment），修复后绿 |
+| M6 遗留：真实 LLM 的 ChunkSummary 质量 | `CrossSessionMapReduceIT` | **通过**（48s 实跑，首次未被跳过） |
+| M5 遗留：真实 LLM 多维度并行 | `MultiAgentIntegrationIT` | **通过**（14s 实跑，首次未被跳过） |
+| 全仓回归 | `mvn verify` | **通过**。8 模块 BUILD SUCCESS；**179 测试 0 失败 0 跳过**（review 111 单测 + 30 IT，integration 25 + 7，其余模块 6） |
+
+S6 评审（固定点 `d3b4625`，双轴子代理）：标准轴 0 硬违规、7 条判断题；规格轴 3 缺失 + 2 出入。
+回 S5 修了 5 项（URI 编码、RealPR 残留跳过、源码非空断言、卡死判定反向用例、重命名走解析器），
+其余判断题记入下方技术债。
+
+本里程碑踩到并修掉的缺陷（都是 M3~M6 攒下、DAG 首次在真实容器里跑才暴露的）：
+
+- 开了 default typing 的 checkpoint mapper 注册成 bean → Boot Jackson 自动配置退让、它成了全局 mapper →
+  Feign 请求体与 LLM 调用 JSON 全带类型数组（Feign 400、LLM IT 超时）
+- `ChunkSummary.isComplete()` 被当 is-getter 序列化成 `complete` 字段，读回时 record 不认，评审在 GlobalReduce 前失败。
+  `NodeRunRepositoryIT` 的往返用例用 3 参构造器（summary 为 null）所以没覆盖到
+- `review_chunk.chunk_id` 是全局主键而 chunkId 任务内编号，第二个任务 plan-chunks 必撞主键
+- Feign 缺 loadbalancer、`ReviewAgent` 构造器歧义（`19111da`）
+- `RealPullRequestReviewIT` 断言插库前的本地 task 实例（永远 `CREATED`）；有残留时被 `assumeTrue` 静默跳过
+
+遗留问题 / 技术债：
+
+- **安全：internal 端点无鉴权且经网关可达**。网关 discovery locator 自动建 `/codemind-integration/**` 路由，
+  `/codemind-integration/internal/pulls/contents` 能用 integration 的 token 读仓库。本机网关当前未运行；
+  网关暴露到本机之外前必须封掉（显式排除 `/internal/**` 或服务间鉴权）。M7b 回写端点若也走 internal，同样受影响
+- 首次触发路径非原子：两条并发投递同时看到 `CREATED` 可能双跑（恢复路径已原子抢占）。M7b 回写幂等表兜外部副作用
+- 恢复判定是启发式的（15m 无活动即判卡死），无节点级心跳
+- N 个 Java 文件 = N 次 `contents` 调用，无并发无缓存
+- 噪声：同一问题被不同维度用不同措辞重复报，fingerprint 拦不住（M7b 处理）
+- GlobalReduce 的 Finding `line=0`（M7b 回写需降级为总结评论）
+- S6 判断题，未处理：共享状态键 `"diffText"` / `"newSources"` 裸字符串三处重复；`JdbcReviewTaskRepository` 的
+  进行中状态名硬编码在 SQL、与枚举无关联；`ReviewExecutionService` 有只给测试用的 null 执行器构造器；
+  `RecoverySchedulingConfig`（infrastructure）依赖 application
+- `findings` 未落库，只挂在内存聚合上（M7b 回写需要时再定是否持久化）
+- `CODEMIND_RECOVERY_ENABLED` 默认关，M13 演示脚本要带上
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**。3.3 补 review → integration 的 internal 端点 + Feign 落地方式与安全缺口；
+4 澄清「FAILED 恢复回原阶段」实际是 `FAILED → PLANNING` + checkpoint 跳过已完成节点，补 `review_chunk` 主键；
+5 补入口链路、卡死恢复、checkpoint 序列化约束；8 加一条决策（只有 integration 直连 GitHub）。
 
 ### M6 跨会话 Map-Reduce（ChangeMap、ChunkSummary、GlobalReduce）—— 完成于 2026-10-10
 
@@ -241,8 +326,6 @@ summary，变更地图单独给不出第二条。所以断言证明的是「Map-
 
 与 ARCHITECTURE.md 的偏差：无。多 Agent 并行维度（STYLE / SECURITY / PERFORMANCE / TEST）按 ARCHITECTURE 5 落地；
 fingerprint 去重按 ARCHITECTURE 4 落地。
-
-## 已完成里程碑
 
 ### M4 LLM 接入与结构化输出（单 Agent）—— 完成于 2026-10-09
 
@@ -543,7 +626,15 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-10 | M6 | 里程碑验证点用「确定性 stub + 真实 LLM」双轨断言 | 强断言（file / category / message 关键词）交给按 prompt 内容作答的 stub，确保可重复；真实 LLM 只做宽松检查（措辞不稳定）。stub 的触发条件要求两条证据分别来自不同切片的 summary，变更地图单独给不出第二条，故断言证明的是「信息真的流到了归约会话」而非「桩会说话」。沿用 M4「畸形输出用 stub、happy-path 用真实 LLM」的既有做法（用户在判定门选此项） |
 | 2026-10-10 | M6 | `ChunkSummary` 按 `chunkId` 关联在 `ReviewTask` 上，而非塞进 `ReviewChunk` 值对象（ARCHITECTURE 4 原图画在后者下） | 切片是规划阶段产物、摘要是评审阶段产物。塞进值对象就得为挂摘要重建整个切片，还要动 `review_chunk` 表结构；按 chunkId 关联信息等价、改动面小。ARCHITECTURE 4 与 6.4 已同步 |
 | 2026-10-10 | M6 | `BuildChangeMap` 排在 `PlanChunks` 之前（ARCHITECTURE 5 原图为之后） | 两者无数据依赖（地图要全量文件列表与签名，与切片结果无关）。地图先行可保证任何子会话启动前它已落进共享状态，省掉一次顺序约束。ARCHITECTURE 5 已同步 |
-| 2026-10-10 | M6 | 本机 `docker.exe` 对当前账号执行不了，容器只能由用户手工启动 | Git Bash 与 cmd 均报「拒绝访问」，而 NTFS ACL 正常（完全控制）、非重解析点、无 `docker-users` 组、TCP 2375 未暴露。疑与 PATH 里 `C:\Program Files\YunShu\utils`（云枢终端管控）有关。另：宿主机原生 PG 服务 `postgresql-x64-16` 占 5432，与容器冲突，征兆是 IT 报「用户 codemind 密码认证失败」，需先 `net stop` |
+| 2026-10-10 | M6 | 本机 `docker.exe` 对当前账号执行不了，容器只能由用户手工启动（**2026-10-22 已不成立**，见环境坑） | Git Bash 与 cmd 均报「拒绝访问」，而 NTFS ACL 正常（完全控制）、非重解析点、无 `docker-users` 组、TCP 2375 未暴露。疑与 PATH 里 `C:\Program Files\YunShu\utils`（云枢终端管控）有关。另：宿主机原生 PG 服务 `postgresql-x64-16` 占 5432，与容器冲突，征兆是 IT 报「用户 codemind 密码认证失败」，需先 `net stop` |
+| 2026-10-22 | M7a | M7 拆成 M7a（入口链路，只读）/ M7b（回写） | M3~M6 的 DAG 从未在真实容器里接线，回写之前得先让真实 PR 能流进评审。只读部分无外部副作用，可独立验证 |
+| 2026-10-22 | M7a | 只有 integration 直连 GitHub，review 经 internal 端点 + Feign 取内容 | Token 只在一个服务；review 不感知 SCM 平台。ARCHITECTURE 3.3 / 8 已同步 |
+| 2026-10-22 | M7a | checkpoint mapper 由 `JdbcNodeRunRepository` 自持，不注册 bean | 注册成 bean 会让 Boot 的 `JacksonAutoConfiguration` 按 `@ConditionalOnMissingBean` 退让，带类型信息的 mapper 成为全局唯一 mapper；`@Qualifier` 只管注入点，管不住自动配置退让 |
+| 2026-10-22 | M7a | checkpoint mapper 关 IS_GETTER 探测，而不是给 domain 加 `@JsonIgnore` | domain 不碰 Jackson 注解；record 的 boolean 组件走组件访问器 `degraded()`，不受影响 |
+| 2026-10-22 | M7a | V4 用于 `review_chunk` 主键修复，M7b 回写幂等表顺延 V5 | 主键缺陷阻塞验证点必须先修；计划原把 V4 预留给幂等表（用户在会话中确认） |
+| 2026-10-22 | M7a | ScmException → 502 另建 `PullRequestContentExceptionHandler`，不改 `WebhookExceptionHandler` | 后者按 `assignableTypes` 限定到 webhook 控制器，放宽会让 401/400 映射溢出到新端点 |
+| 2026-10-22 | M7a | `RealPullRequestReviewIT` 自动清残留 + `assertTrue`，不用 `assumeTrue(insertIfAbsent)` | 跳过的 IT 不算验证通过；残留让三个核心验证点被静默绕过（S6 规格轴发现） |
+| 2026-10-22 | M7a | 恢复驱动 `CODEMIND_RECOVERY_ENABLED` 默认关 | 开着会让所有 IT 上下文里多一个扫库定时任务；逻辑由直接调 `recoverStaleTasks()` 的测试覆盖 |
 
 ## 环境与常用命令
 
