@@ -85,4 +85,26 @@ class ChunkRepositoryIT {
         assertEquals(List.of("B.java"), found.get(0).files());
         assertEquals("new", found.get(0).diffContent());
     }
+
+    /**
+     * chunkId 只在任务内唯一：{@code SemanticChunker} 对每个任务都从 {@code chunk-0} 编号。
+     *
+     * <p>M7a 踩过：V2 把 chunk_id 设成全局主键，库里只要有过一个任务的切片，
+     * 第二个任务落 {@code chunk-0} 就撞主键，plan-chunks 节点失败（V4 改为 (task_id, chunk_id)）。
+     */
+    @Test
+    void sameChunkIdCanBeSavedUnderDifferentTasks() {
+        ReviewTask first = ReviewTask.create(repo, 102, "head-a", "base-a", UUID.randomUUID().toString());
+        ReviewTask second = ReviewTask.create(repo, 103, "head-b", "base-b", UUID.randomUUID().toString());
+        taskRepository.insertIfAbsent(first);
+        taskRepository.insertIfAbsent(second);
+
+        chunkRepository.saveAll(first.taskId(),
+                List.of(new ReviewChunk("chunk-0", List.of("A.java"), List.of(), "first", 10, false)));
+        chunkRepository.saveAll(second.taskId(),
+                List.of(new ReviewChunk("chunk-0", List.of("B.java"), List.of(), "second", 20, false)));
+
+        assertEquals("first", chunkRepository.findByTask(first.taskId()).get(0).diffContent());
+        assertEquals("second", chunkRepository.findByTask(second.taskId()).get(0).diffContent());
+    }
 }
