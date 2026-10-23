@@ -8,6 +8,8 @@ import com.codemind.review.domain.memory.MemoryRecallPort;
 import com.codemind.review.domain.memory.RecalledMemory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +24,8 @@ import java.util.stream.Collectors;
  * 真缺陷，只记一条降级说明交调用方并入报告的 degradations（与 M4 {@code ReviewAgent} 的降级思路一致）。
  */
 public final class FindingFilter {
+
+    private static final Logger log = LoggerFactory.getLogger(FindingFilter.class);
 
     // Global Constraints：minScore 沿用 M9a 冲突消解的 CONFLICT_MIN_SCORE
     private static final int TOP_K = 5;
@@ -53,43 +57,58 @@ public final class FindingFilter {
 
     public FilterOutcome filter(String project, List<Finding> findings) {
         List<Finding> kept = new ArrayList<>();
-        List<String> degradations = new ArrayList<>();
+        List<String> llmDegradations = new ArrayList<>();
+        String recallFailureReason = null;
+        int recallFailureCount = 0;
         for (Finding finding : findings) {
-            if (shouldKeep(project, finding, degradations)) {
+            List<RecalledMemory> candidates;
+            try {
+                candidates = recallPort.recallRejectedPatterns(project,
+                        finding.category() + ": " + finding.message(), TOP_K, MIN_SCORE);
+            } catch (MemoryRecallException e) {
+                recallFailureReason = e.getMessage();
+                recallFailureCount++;
+                kept.add(finding);
+                continue;
+            }
+            if (candidates.isEmpty() || !shouldFilter(finding, candidates, llmDegradations)) {
                 kept.add(finding);
             }
+        }
+        List<String> degradations = new ArrayList<>(llmDegradations);
+        if (recallFailureCount > 0) {
+            // 同一根因（如 memory 服务不可达）在每条 Finding 上重复出现，合并成一条，
+            // 不然会在公开 PR 评论里刷出近乎重复的内部错误信息（S6 评审发现）
+            degradations.add("记忆召回失败，%d 条意见全部放行：%s".formatted(recallFailureCount, recallFailureReason));
         }
         return new FilterOutcome(kept, degradations);
     }
 
-    private boolean shouldKeep(String project, Finding finding, List<String> degradations) {
-        List<RecalledMemory> candidates;
-        try {
-            candidates = recallPort.recallRejectedPatterns(project,
-                    finding.category() + ": " + finding.message(), TOP_K, MIN_SCORE);
-        } catch (MemoryRecallException e) {
-            degradations.add("记忆召回失败，放行 fingerprint=" + finding.fingerprint() + "：" + e.getMessage());
-            return true;
-        }
-        if (candidates.isEmpty()) {
-            return true;
-        }
+    /** @return {@code true} 表示该 Finding 判定为被否决的同类意见，应从报告中过滤掉 */
+    private boolean shouldFilter(Finding finding, List<RecalledMemory> candidates, List<String> degradations) {
         Boolean filtered = judge(finding, candidates, degradations);
-        return filtered == null || !filtered;
+        boolean result = Boolean.TRUE.equals(filtered);
+        if (result) {
+            log.info("Finding 判定为同类否决意见，已过滤 fingerprint={} category={} 命中候选={}",
+                    finding.fingerprint(), finding.category(),
+                    candidates.stream().map(RecalledMemory::content).toList());
+        }
+        return result;
     }
 
     /** @return {@code true}/{@code false} 为 LLM 判定结果；{@code null} 表示判定失败，按放行处理 */
     private Boolean judge(Finding finding, List<RecalledMemory> candidates, List<String> degradations) {
         String user = userPrompt(finding, candidates);
+        String lastError = "";
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
                 String raw = llmClient.complete(SYSTEM_PROMPT, user);
                 return parse(raw);
             } catch (LlmException | IllegalArgumentException e) {
-                // 重试
+                lastError = e.getMessage();
             }
         }
-        degradations.add("LLM 判定失败，放行 fingerprint=" + finding.fingerprint());
+        degradations.add("LLM 判定失败，放行 fingerprint=" + finding.fingerprint() + "：" + lastError);
         return null;
     }
 

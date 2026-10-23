@@ -25,18 +25,20 @@ public class FeignMemoryRecallAdapter implements MemoryRecallPort {
 
     @Override
     public List<RecalledMemory> recallRejectedPatterns(String project, String query, int topK, double minScore) {
-        RecallResponseDto response;
         try {
-            response = feignClient.recall(new RecallRequestDto(project, query, topK, REJECTED_PATTERN, minScore));
+            var result = feignClient.recall(new RecallRequestDto(project, query, topK, REJECTED_PATTERN, minScore));
+            RecallResponseDto response = result == null ? null : result.data();
+            if (response == null || response.memories() == null) {
+                return List.of();
+            }
+            return response.memories().stream()
+                    .map(item -> new RecalledMemory(item.memory().content(), item.score()))
+                    .toList();
         } catch (RuntimeException e) {
+            // 脏数据（如缺字段的候选项）在映射阶段抛的 NPE 也要包成 MemoryRecallException——
+            // 召回失败必须放行，不能因为过滤器出错而让整个评审任务失败（S6 评审发现）。
             throw new MemoryRecallException(
                     "召回否决记忆失败 project=%s query=%s".formatted(project, query), e);
         }
-        if (response == null || response.memories() == null) {
-            return List.of();
-        }
-        return response.memories().stream()
-                .map(item -> new RecalledMemory(item.memory().content(), item.score()))
-                .toList();
     }
 }
