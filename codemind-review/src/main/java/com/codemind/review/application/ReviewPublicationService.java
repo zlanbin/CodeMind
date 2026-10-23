@@ -1,7 +1,13 @@
 package com.codemind.review.application;
 
 import com.codemind.common.event.ReviewPublished;
+import com.codemind.review.domain.finding.Finding;
+import com.codemind.review.domain.publication.FingerprintRegistrationOutboxRepository;
 import com.codemind.review.domain.publication.ReviewOutboxRepository;
+import com.codemind.review.domain.report.ReviewReport;
+import com.codemind.review.domain.report.SummaryItem;
+import com.codemind.review.domain.task.LastReviewedHeadRepository;
+import com.codemind.review.domain.task.ReviewTask;
 import com.codemind.review.domain.task.ReviewTaskRepository;
 import com.codemind.review.domain.task.ReviewTaskStatus;
 import org.slf4j.Logger;
@@ -10,6 +16,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.stream.Stream;
 
 /** 成功状态与 outbox 确认同事务，统一先锁 task。 */
 @Service
@@ -19,12 +27,18 @@ public class ReviewPublicationService {
     private final ReviewTaskRepository tasks;
     private final ReviewOutboxRepository outbox;
     private final TransactionTemplate transactions;
+    private final LastReviewedHeadRepository lastReviewedHeadRepository;
+    private final FingerprintRegistrationOutboxRepository fingerprintOutbox;
 
     public ReviewPublicationService(ReviewTaskRepository tasks, ReviewOutboxRepository outbox,
-                                    TransactionTemplate transactions) {
+                                    TransactionTemplate transactions,
+                                    LastReviewedHeadRepository lastReviewedHeadRepository,
+                                    FingerprintRegistrationOutboxRepository fingerprintOutbox) {
         this.tasks = tasks;
         this.outbox = outbox;
         this.transactions = transactions;
+        this.lastReviewedHeadRepository = lastReviewedHeadRepository;
+        this.fingerprintOutbox = fingerprintOutbox;
     }
 
     public boolean markPublished(ReviewPublished event) {
@@ -43,7 +57,30 @@ public class ReviewPublicationService {
                 return false;
             }
             outbox.acknowledge(event.taskId(), Instant.now());
+
+            // 只在「首次把任务推进到 PUBLISHED」时落 M10 的基准与指纹账本，重复回执（任务早已
+            // PUBLISHED）不该重复写——否则 last_reviewed_head 会被旧回执的 headSha 覆盖掉新基准。
+            boolean firstAdvance = !alreadyPublished && advanced;
+            if (firstAdvance) {
+                ReviewTask t = task.get();
+                lastReviewedHeadRepository.upsert(t.repo(), t.prNumber(), t.baseSha(), t.headSha());
+                if (t.report() != null) {
+                    List<String> fingerprints = collectFingerprints(t.report());
+                    if (!fingerprints.isEmpty()) {
+                        fingerprintOutbox.insert(t.taskId(), t.repo(), t.prNumber(), fingerprints);
+                    }
+                }
+            }
             return true;
         }));
+    }
+
+    private static List<String> collectFingerprints(ReviewReport report) {
+        return Stream.concat(
+                report.inline().stream().flatMap(c -> c.merged().stream()),
+                report.summary().stream().map(SummaryItem::finding))
+                .map(Finding::fingerprint)
+                .distinct()
+                .toList();
     }
 }
