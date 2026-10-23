@@ -37,11 +37,17 @@ rocketmq:
     send-message-timeout: 3000
 
 codemind:
+  report:
+    min-inline-severity: ${CODEMIND_MIN_INLINE_SEVERITY:MAJOR}
+    max-inline: ${CODEMIND_MAX_INLINE:10}
   mq:
     topic:
       pull-request-received: codemind-pull-request-received
+      review-completed: codemind-review-completed
+      review-published: codemind-review-published
     consumer-group:
       pull-request-received: codemind-review-pr-received
+      review-published: codemind-review-review-published
   llm:
     max-retries: ${CODEMIND_LLM_MAX_RETRIES:2}
   dag:
@@ -50,6 +56,12 @@ codemind:
     node-retries: ${CODEMIND_DAG_NODE_RETRIES:1}
     # 单片 diff 的 token 上限；0 表示用默认（总预算 128k × 30%）
     diff-budget: ${CODEMIND_DIFF_BUDGET:0}
+  publication:
+    dispatch-enabled: ${CODEMIND_PUBLICATION_DISPATCH_ENABLED:true}
+    scan-interval: 30s
+    batch-size: 50
+    lease: 120s
+    retry-delay: 60s
   recovery:
     # 默认关：开着会让所有 IT 的上下文里多一个定时任务扫库。真实运行与演示必须设为 true
     enabled: ${CODEMIND_RECOVERY_ENABLED:false}

@@ -102,7 +102,34 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <!-- 默认排除真实写 GitHub 的验收 IT（精确文件名，不用通配，免得以后本地新增
+                     *PublishIT 时被一并漏跑）。github-write profile 清掉这条排除。 -->
+                <configuration>
+                    <excludes>
+                        <exclude>**/RealPullRequestPublishIT.java</exclude>
+                    </excludes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 真实写 zlanbin/codemind-sandbox 的验收 profile（M7b Task 10）。
+             只清掉上面那条排除，不额外收窄 includes——普通 IT 跟着一起跑，
+             这样这个 profile 不会悄悄替换掉日常回归，只是多跑一个验收 IT。 -->
+        <profile>
+            <id>github-write</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <excludes combine.self="override" />
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

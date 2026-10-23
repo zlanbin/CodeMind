@@ -68,6 +68,17 @@ docker exec codemind-postgres psql -U codemind -d codemind \
 签名错误返回 401；同一 `X-GitHub-Delivery` 重放只会生成一个评审任务。新建 topic 首次投递需等约 20s
 （consumer 路由刷新），之后在 4s 内落库。
 
+### 回写 PR（M7b 起）
+
+评审完成后 review 经 outbox + MQ 交给 integration，由它向 PR 提交总结与行级评论，成功后任务进入 `PUBLISHED`。
+
+- integration 启动起依赖 PostgreSQL，发送账本在独立 schema `integration`
+- 发布用的 `GITHUB_TOKEN` 需要 `pull_requests: write`，且账号不能是 PR 作者（GitHub 对自评 review 返回 422）
+- 行级评论门槛与上限：`CODEMIND_MIN_INLINE_SEVERITY`（默认 `MAJOR`）、`CODEMIND_MAX_INLINE`（默认 10）
+
+普通 `mvn verify` 不写真实 GitHub。真实写验收用 `-Pgithub-write` 分 prepare / publish 两阶段跑，
+命令、状态查询和卡住时的处理见 [docs/operations/M7b-publication.md](docs/operations/M7b-publication.md)。
+
 ## 说明
 
 本地开发的 Nacos 关闭了鉴权，仅适用于开发环境。LLM API Key、GitHub Token、Webhook Secret 等密钥通过环境变量注入，不写入仓库。

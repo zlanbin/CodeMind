@@ -32,8 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
                 "spring.cloud.nacos.discovery.enabled=false",
                 "spring.cloud.discovery.enabled=false",
                 "codemind.webhook.github-secret=" + GithubWebhookIT.SECRET,
-                // 不污染业务 topic
-                "codemind.mq.topic.pull-request-received=codemind-pull-request-received-it"
+                // 本类专用 topic 与 producer group，不污染其它 IT 或业务链路
+                "codemind.mq.topic.pull-request-received=codemind-pull-request-received-webhook-it",
+                "rocketmq.producer.group=codemind-integration-webhook-it"
         })
 class GithubWebhookIT {
 

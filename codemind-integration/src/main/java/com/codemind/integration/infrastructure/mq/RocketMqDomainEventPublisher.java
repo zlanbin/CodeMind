@@ -2,6 +2,7 @@ package com.codemind.integration.infrastructure.mq;
 
 import com.codemind.common.event.DomainEvent;
 import com.codemind.common.event.PullRequestReceived;
+import com.codemind.common.event.ReviewPublished;
 import com.codemind.integration.domain.event.DomainEventPublisher;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,10 +32,13 @@ public class RocketMqDomainEventPublisher implements DomainEventPublisher {
     public RocketMqDomainEventPublisher(
             RocketMQTemplate rocketMQTemplate,
             ObjectMapper objectMapper,
-            @Value("${codemind.mq.topic.pull-request-received}") String pullRequestReceivedTopic) {
+            @Value("${codemind.mq.topic.pull-request-received}") String pullRequestReceivedTopic,
+            @Value("${codemind.mq.topic.review-published}") String reviewPublishedTopic) {
         this.rocketMQTemplate = rocketMQTemplate;
         this.objectMapper = objectMapper;
-        this.topics = Map.of(PullRequestReceived.class, pullRequestReceivedTopic);
+        this.topics = Map.of(
+                PullRequestReceived.class, pullRequestReceivedTopic,
+                ReviewPublished.class, reviewPublishedTopic);
     }
 
     @Override

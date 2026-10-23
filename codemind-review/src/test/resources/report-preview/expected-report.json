@@ -1,0 +1,10 @@
+{
+  "inline": [{"path":"src/Inventory.java","line":11,"maxSeverity":"CRITICAL","merged":[
+    {"file":"src/Inventory.java","line":11,"severity":"CRITICAL","category":"CORRECTNESS","message":"边界越界","suggestion":"改用 < size()","fingerprint":"preview-correctness"},
+    {"file":"src/Inventory.java","line":11,"severity":"MAJOR","category":"SECURITY","message":"输入未校验","suggestion":"校验输入","fingerprint":"preview-security"},
+    {"file":"src/Inventory.java","line":11,"severity":"MINOR","category":"TEST","message":"缺少边界测试","suggestion":"增加空集合用例","fingerprint":"preview-test"}
+  ]}],
+  "summary": [{"finding":{"file":"src/Inventory.java","line":0,"severity":"INFO","category":"DESIGN","message":"文件级说明","suggestion":"补充设计说明","fingerprint":"preview-design"},"reason":"NO_LINE"}],
+  "degradations": ["PERFORMANCE 超时"],
+  "totalFindings": 4
+}

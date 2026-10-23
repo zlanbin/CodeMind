@@ -1,6 +1,15 @@
 package com.codemind.review.domain.task;
 
+import com.codemind.review.domain.chunk.ReviewChunk;
+import com.codemind.review.domain.finding.Category;
+import com.codemind.review.domain.finding.Finding;
+import com.codemind.review.domain.finding.Severity;
+import com.codemind.review.domain.report.Reason;
+import com.codemind.review.domain.report.ReviewReport;
+import com.codemind.review.domain.report.SummaryItem;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -52,6 +61,34 @@ class ReviewTaskTest {
     void PUBLISHED是终态不可再流转() {
         assertThat(ReviewTaskStatus.PUBLISHED.allowedNext()).isEmpty();
         assertThat(ReviewTaskStatus.FAILED.canTransitionTo(ReviewTaskStatus.PUBLISHED)).isFalse();
+    }
+
+    @Test
+    void reportIsNullUntilAssignedAndCanBeReplacedWithoutChangingFindingsOrChunks() {
+        ReviewTask task = newTask();
+        assertThat(task.report()).isNull();
+        Finding finding = new Finding("a.java", 0, Severity.MAJOR, Category.DESIGN, "design", "fix", "fp");
+        ReviewChunk chunk = new ReviewChunk("chunk-1", List.of("a.java"), List.of(), "+line", 1, false);
+        task.assignFindings(List.of(finding));
+        task.assignChunks(List.of(chunk));
+        ReviewReport first = new ReviewReport(List.of(), List.of(new SummaryItem(finding, Reason.NO_LINE)), List.of(), 1);
+        ReviewReport replacement = new ReviewReport(List.of(), List.of(), List.of("部分维度降级"), 0);
+        task.assignReport(first);
+        assertThat(task.report()).isSameAs(first);
+        task.assignReport(replacement);
+        assertThat(task.report()).isSameAs(replacement);
+        assertThat(task.findings()).containsExactly(finding);
+        assertThat(task.chunks()).containsExactly(chunk);
+        assertThat(task.status()).isEqualTo(ReviewTaskStatus.CREATED);
+    }
+
+    @Test
+    void nullReportAssignmentIsRejectedWithoutLosingPreviousReport() {
+        ReviewTask task = newTask();
+        ReviewReport report = new ReviewReport(List.of(), List.of(), List.of(), 0);
+        task.assignReport(report);
+        assertThatThrownBy(() -> task.assignReport(null)).isInstanceOf(NullPointerException.class);
+        assertThat(task.report()).isSameAs(report);
     }
 
     @Test

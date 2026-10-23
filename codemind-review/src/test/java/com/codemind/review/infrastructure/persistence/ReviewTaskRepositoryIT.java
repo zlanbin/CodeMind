@@ -25,6 +25,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class ReviewTaskRepositoryIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     @Autowired
     private ReviewTaskRepository repository;
 

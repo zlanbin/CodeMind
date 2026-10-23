@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -26,13 +27,22 @@ import static org.awaitility.Awaitility.await;
 @SpringBootTest(properties = {
         "spring.cloud.nacos.discovery.enabled=false",
         "spring.cloud.discovery.enabled=false",
-        // 独立 topic 与消费组，不污染业务链路
-        "codemind.mq.topic.pull-request-received=codemind-pull-request-received-it",
-        "codemind.mq.consumer-group.pull-request-received=codemind-review-pr-received-it"
+        // 本类专用 topic、消费组与 producer group，不污染其它 IT 或业务链路
+        "codemind.mq.topic.pull-request-received=codemind-pull-request-received-listener-it",
+        "codemind.mq.consumer-group.pull-request-received=codemind-review-pr-received-listener-it",
+        "rocketmq.producer.group=codemind-review-listener-it"
 })
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PullRequestReceivedListenerIT {
 
-    private static final String TOPIC = "codemind-pull-request-received-it";
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
+    private static final String TOPIC = "codemind-pull-request-received-listener-it";
 
     @Autowired
     private RocketMQTemplate rocketMQTemplate;

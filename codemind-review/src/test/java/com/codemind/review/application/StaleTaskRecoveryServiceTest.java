@@ -118,6 +118,19 @@ class StaleTaskRecoveryServiceTest {
         }
 
         @Override
+        public Optional<ReviewTask> findByIdForUpdate(String taskId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public boolean markFailedIfUnpublished(String taskId) {
+            return false;
+        }
+
+        @Override
+        public boolean markPublishedIfAggregating(String taskId) { return false; }
+
+        @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
         }
     }

@@ -24,6 +24,13 @@ import static org.junit.jupiter.api.Assertions.*;
 @SpringBootTest
 class NodeRunRepositoryIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     @Autowired
     private NodeRunRepository repository;
 

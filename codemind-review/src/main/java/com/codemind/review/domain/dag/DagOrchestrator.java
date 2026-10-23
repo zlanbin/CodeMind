@@ -149,6 +149,8 @@ public final class DagOrchestrator {
 
         if (chunks == null || chunks.isEmpty()) {
             log.warn("任务 {} 切片为空，跳过评审", taskId);
+            advance(task, ReviewTaskStatus.REVIEWING);
+            advance(task, ReviewTaskStatus.AGGREGATING);
             return new CrossSessionReviewResult(changeMap, Map.of(),
                     GlobalReduceResult.degraded("切片为空，无可归约摘要", 0));
         }
