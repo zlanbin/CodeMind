@@ -46,6 +46,7 @@ public class ReviewExecutionService {
     private final ReviewMarkdownRenderer renderer;
     private final com.codemind.review.domain.finding.FindingFilter findingFilter;
     private final com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository;
+    private final com.codemind.review.domain.finding.TaskFingerprintPort taskFingerprintPort;
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -59,7 +60,8 @@ public class ReviewExecutionService {
                                   com.codemind.review.domain.report.ReportPolicy reportPolicy,
                                   ReviewMarkdownRenderer renderer,
                                   com.codemind.review.domain.finding.FindingFilter findingFilter,
-                                  com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository) {
+                                  com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository,
+                                  com.codemind.review.domain.finding.TaskFingerprintPort taskFingerprintPort) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -74,6 +76,7 @@ public class ReviewExecutionService {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.findingFilter = Objects.requireNonNull(findingFilter, "findingFilter");
         this.lastReviewedHeadRepository = Objects.requireNonNull(lastReviewedHeadRepository, "lastReviewedHeadRepository");
+        this.taskFingerprintPort = Objects.requireNonNull(taskFingerprintPort, "taskFingerprintPort");
     }
 
     /**
@@ -145,9 +148,20 @@ public class ReviewExecutionService {
                 result = orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, context);
             }
             var filterOutcome = findingFilter.filter(task.repo(), result.allFindings());
-            var report = reportBuilder.build(filterOutcome.kept(), diffFiles,
-                    java.util.stream.Stream.concat(result.allDegradations().stream(),
-                            filterOutcome.degradations().stream()).toList(),
+            List<com.codemind.review.domain.finding.Finding> afterPublishedFilter = filterOutcome.kept();
+            List<String> publishedFilterDegradations = new java.util.ArrayList<>();
+            try {
+                java.util.Set<String> published = taskFingerprintPort.published(task.repo(), task.prNumber());
+                afterPublishedFilter = afterPublishedFilter.stream()
+                        .filter(f -> !published.contains(f.fingerprint())).toList();
+            } catch (com.codemind.review.domain.finding.TaskFingerprintException e) {
+                publishedFilterDegradations.add("已发布指纹查询失败，放行全部 Finding：" + e.getMessage());
+            }
+            var report = reportBuilder.build(afterPublishedFilter, diffFiles,
+                    java.util.stream.Stream.concat(
+                            java.util.stream.Stream.concat(result.allDegradations().stream(),
+                                    filterOutcome.degradations().stream()),
+                            publishedFilterDegradations.stream()).toList(),
                     reportPolicy);
             task.assignReport(report);
             var comments = report.inline().stream().map(comment ->

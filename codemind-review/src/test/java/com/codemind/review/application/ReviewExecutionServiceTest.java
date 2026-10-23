@@ -42,6 +42,7 @@ class ReviewExecutionServiceTest {
     private final StubTaskRepository tasks = new StubTaskRepository();
     private final ReviewOutboxDispatcherTest.MemoryOutbox requests = new ReviewOutboxDispatcherTest.MemoryOutbox();
     private final StubLastReviewedHeadRepository lastReviewedHeads = new StubLastReviewedHeadRepository();
+    private final StubTaskFingerprintPort taskFingerprints = new StubTaskFingerprintPort();
 
     @Test
     void skipsJavaDeletedFilesWhenCollectingSourcePaths() {
@@ -276,6 +277,34 @@ class ReviewExecutionServiceTest {
         assertTrue(scm.fetchDiffCalled, "status 非 ahead 应回退全量 diff");
     }
 
+    @Test
+    void alreadyPublishedFingerprintIsFilteredOutAfterFindingFilter() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprint = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.CORRECTNESS, "int x = 1;");
+        taskFingerprints.published = Set.of(fingerprint);
+
+        service(passThroughFindingFilter(), new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(0, task.report().totalFindings(), "已发布过的指纹应被过滤，不该重复出现在报告里");
+    }
+
+    @Test
+    void publishedFingerprintQueryFailurePassesThroughFindings() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        taskFingerprints.failure =
+                new com.codemind.review.domain.finding.TaskFingerprintException("memory 不可达", null);
+
+        service(passThroughFindingFilter(), new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "查询失败要放行 Finding，不能压掉");
+        assertEquals(1, task.report().degradations().size(), "查询失败的降级说明要并入报告");
+    }
+
     // --- 装配 ---
 
     private ReviewExecutionService service() {
@@ -308,7 +337,7 @@ class ReviewExecutionServiceTest {
                         })),
                 new com.codemind.review.domain.report.ReviewReportBuilder(),
                 com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer(),
-                findingFilter, lastReviewedHeads);
+                findingFilter, lastReviewedHeads, taskFingerprints);
     }
 
     /** 不召回任何候选，等价于「过滤器不生效」，让既有用例的断言不受影响。 */
@@ -443,6 +472,25 @@ class ReviewExecutionServiceTest {
         @Override
         public void upsert(String repo, int prNumber, String baseSha, String headSha) {
             throw new UnsupportedOperationException("ReviewExecutionService 不调用 upsert，见 Task 6");
+        }
+    }
+
+    private static final class StubTaskFingerprintPort
+            implements com.codemind.review.domain.finding.TaskFingerprintPort {
+        private Set<String> published = Set.of();
+        private com.codemind.review.domain.finding.TaskFingerprintException failure;
+
+        @Override
+        public Set<String> published(String repo, int prNumber) {
+            if (failure != null) {
+                throw failure;
+            }
+            return published;
+        }
+
+        @Override
+        public void record(String repo, int prNumber, List<String> fingerprints) {
+            throw new UnsupportedOperationException("ReviewExecutionService 不调用 record，见 Task 5/6");
         }
     }
 
