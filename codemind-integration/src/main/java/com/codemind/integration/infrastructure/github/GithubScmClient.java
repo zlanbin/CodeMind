@@ -451,6 +451,34 @@ public class GithubScmClient implements ScmClient, ScmReviewPublisher, ScmFeedba
         return get(uri, RAW_MEDIA_TYPE, "%s 的文件 %s@%s".formatted(repo, path, ref));
     }
 
+    @Override
+    public com.codemind.integration.application.port.CompareResult fetchCompareDiff(
+            String repo, String oldHead, String newHead) {
+        URI uri = URI.create("%s/repos/%s/compare/%s...%s".formatted(baseUrl, encodePath(repo),
+                UriUtils.encodePathSegment(oldHead, StandardCharsets.UTF_8),
+                UriUtils.encodePathSegment(newHead, StandardCharsets.UTF_8)));
+        String target = "%s 对比 %s...%s".formatted(repo, oldHead, newHead);
+        String statusJson = get(uri, JSON_MEDIA_TYPE, target);
+        String status;
+        try {
+            JsonNode root = objectMapper.readTree(statusJson);
+            JsonNode statusNode = root.get("status");
+            if (statusNode == null || !statusNode.isTextual()) {
+                throw new ScmException("compare 响应缺少 status 字段: " + target, 0);
+            }
+            status = statusNode.asText();
+        } catch (JsonProcessingException e) {
+            throw new ScmException("compare 响应不是合法 JSON: " + target, 0, e);
+        }
+        if (!"ahead".equals(status)) {
+            // 非 ahead（diverged/behind/identical）不取 diff 文本，省一次网络调用；
+            // 调用方据此回退到 fetchPullRequestDiff 取整份 diff
+            return new com.codemind.integration.application.port.CompareResult(status, "");
+        }
+        String diffText = get(uri, DIFF_MEDIA_TYPE, target);
+        return new com.codemind.integration.application.port.CompareResult(status, diffText);
+    }
+
     /**
      * 逐段编码、保留 {@code /}：Git 文件名可含空格、{@code #}、{@code ?}，原样拼进 URI 会被截成
      * fragment / query。编好后以 {@link URI} 传给 RestClient，它不会再编一遍。

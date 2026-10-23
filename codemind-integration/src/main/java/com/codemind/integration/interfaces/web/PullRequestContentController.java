@@ -1,6 +1,7 @@
 package com.codemind.integration.interfaces.web;
 
 import com.codemind.integration.application.PullRequestContentService;
+import com.codemind.integration.interfaces.web.dto.CompareDiffResponse;
 import com.codemind.integration.interfaces.web.dto.FileContentsRequest;
 import com.codemind.integration.interfaces.web.dto.FileContentsResponse;
 import org.springframework.http.MediaType;
@@ -32,5 +33,14 @@ public class PullRequestContentController {
     public FileContentsResponse contents(@RequestBody FileContentsRequest request) {
         return new FileContentsResponse(
                 contentService.fileContents(request.repo(), request.ref(), request.paths()));
+    }
+
+    /** 两次 commit 之间的增量 diff（M10）；JSON 返回（不是纯文本），因为要带 status 字段。 */
+    @GetMapping("/compare-diff")
+    public CompareDiffResponse compareDiff(@RequestParam String repo,
+                                           @RequestParam String oldHead,
+                                           @RequestParam String newHead) {
+        var result = contentService.compareDiff(repo, oldHead, newHead);
+        return new CompareDiffResponse(result.status(), result.diffText());
     }
 }

@@ -1,5 +1,6 @@
 package com.codemind.integration.infrastructure.github;
 
+import com.codemind.integration.application.port.CompareResult;
 import com.codemind.integration.application.port.DraftComment;
 import com.codemind.integration.application.port.ExistingReview;
 import com.codemind.integration.application.port.ReviewDraft;
@@ -62,6 +63,43 @@ class GithubScmClientTest {
         String actual = client.fetchPullRequestDiff("owner/repo", 7);
 
         assertEquals(diff, actual);
+        server.verify();
+    }
+
+    @Test
+    void fetchCompareDiffReturnsStatusAndDiffWhenAhead() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        String statusJson = "{\"status\":\"ahead\",\"ahead_by\":2}";
+        String diff = "diff --git a/A.java b/A.java\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/compare/old-sha...new-sha"))
+                .andExpect(method(org.springframework.http.HttpMethod.GET))
+                .andExpect(header("Accept", "application/vnd.github+json"))
+                .andRespond(withSuccess(statusJson, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/compare/old-sha...new-sha"))
+                .andExpect(method(org.springframework.http.HttpMethod.GET))
+                .andExpect(header("Accept", "application/vnd.github.v3.diff"))
+                .andRespond(withSuccess(diff, MediaType.TEXT_PLAIN));
+
+        CompareResult result = client.fetchCompareDiff("owner/repo", "old-sha", "new-sha");
+
+        assertEquals("ahead", result.status());
+        assertEquals(diff, result.diffText());
+        server.verify();
+    }
+
+    @Test
+    void fetchCompareDiffSkipsDiffCallWhenNotAhead() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        String statusJson = "{\"status\":\"diverged\",\"ahead_by\":1,\"behind_by\":3}";
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/compare/old-sha...new-sha"))
+                .andExpect(method(org.springframework.http.HttpMethod.GET))
+                .andExpect(header("Accept", "application/vnd.github+json"))
+                .andRespond(withSuccess(statusJson, MediaType.APPLICATION_JSON));
+
+        CompareResult result = client.fetchCompareDiff("owner/repo", "old-sha", "new-sha");
+
+        assertEquals("diverged", result.status());
+        assertEquals("", result.diffText());
         server.verify();
     }
 

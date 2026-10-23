@@ -77,5 +77,11 @@ class PullRequestContentServiceTest {
             }
             return "source of " + path;
         }
+
+        @Override
+        public com.codemind.integration.application.port.CompareResult fetchCompareDiff(
+                String repo, String oldHead, String newHead) {
+            throw new UnsupportedOperationException("本测试类未覆盖 compareDiff，见 Task 1 Step 7 的新用例");
+        }
     }
 }
