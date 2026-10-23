@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
  */
 @FeignClient(
         name = "codemind-memory",
+        contextId = "taskFingerprintFeignClient",
         path = "/internal/task-fingerprints",
         url = "${codemind.memory.url:}")
 public interface TaskFingerprintFeignClient {
