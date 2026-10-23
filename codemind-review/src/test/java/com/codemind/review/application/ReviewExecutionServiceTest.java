@@ -36,6 +36,7 @@ class ReviewExecutionServiceTest {
 
     private final RecordingScmContentPort scm = new RecordingScmContentPort();
     private final StubTaskRepository tasks = new StubTaskRepository();
+    private final ReviewOutboxDispatcherTest.MemoryOutbox requests = new ReviewOutboxDispatcherTest.MemoryOutbox();
 
     @Test
     void skipsJavaDeletedFilesWhenCollectingSourcePaths() {
@@ -140,6 +141,49 @@ class ReviewExecutionServiceTest {
                 "取内容失败要把任务标 FAILED，不能静默停在 CREATED");
     }
 
+    @Test
+    void executionPersistsRenderedRequestAfterDag() {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        service().executeReview(task.taskId());
+        var event = requests.findByTaskId(task.taskId()).orElseThrow().event();
+        assertEquals(HEAD, event.headSha());
+        assertEquals(REPO, event.repo());
+        assertEquals(7, event.prNumber());
+        assertTrue(event.summaryBody().contains("原始意见总数"));
+        assertNotNull(task.report());
+        assertEquals(ReviewTaskStatus.AGGREGATING, task.status());
+    }
+
+    @Test
+    void emptyDiffStillRegistersCompletedRequest() {
+        ReviewTask task = insertedTask();
+        service().executeReview(task.taskId());
+        assertTrue(requests.findByTaskId(task.taskId()).isPresent());
+        assertEquals(ReviewTaskStatus.AGGREGATING, task.status());
+    }
+
+    @Test
+    void scmFailureDoesNotCreatePublicationRequest() {
+        ReviewTask task = insertedTask();
+        scm.failure = new ScmContentException("unavailable", new RuntimeException());
+        assertThrows(IllegalStateException.class, () -> service().executeReview(task.taskId()));
+        assertTrue(requests.events.isEmpty());
+    }
+
+    @Test
+    void mqFailureDoesNotMarkTaskFailed() {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        service().executeReview(task.taskId());
+        new ReviewOutboxDispatcher(requests, event -> { throw new IllegalStateException("unavailable"); },
+                java.time.Clock.systemUTC(), 50, Duration.ofSeconds(120), Duration.ofSeconds(60))
+                .dispatchTask(task.taskId());
+        assertEquals(ReviewTaskStatus.AGGREGATING, task.status());
+        assertFalse(tasks.statusHistory.contains(ReviewTaskStatus.FAILED));
+        assertTrue(requests.findByTaskId(task.taskId()).isPresent());
+    }
+
     // --- 装配 ---
 
     private ReviewExecutionService service() {
@@ -158,7 +202,17 @@ class ReviewExecutionServiceTest {
         return new ReviewExecutionService(scm, tasks, orchestrator,
                 new ChangeMapAgent(llm, new ChangeMapJsonParser(mapper), 0),
                 new SemanticChunker(new JtokkitTokenEstimator()),
-                new StubChunkRepository(), ChunkBudget.ofDiffBudget(4000));
+                new StubChunkRepository(), ChunkBudget.ofDiffBudget(4000),
+                org.mockito.Mockito.mock(java.util.concurrent.ExecutorService.class),
+                new ReviewCompletionService(tasks, requests, new org.springframework.transaction.support.TransactionTemplate(
+                        new org.springframework.transaction.support.AbstractPlatformTransactionManager() {
+                            protected Object doGetTransaction() { return new Object(); }
+                            protected void doBegin(Object t, org.springframework.transaction.TransactionDefinition d) { }
+                            protected void doCommit(org.springframework.transaction.support.DefaultTransactionStatus s) { }
+                            protected void doRollback(org.springframework.transaction.support.DefaultTransactionStatus s) { }
+                        })),
+                new com.codemind.review.domain.report.ReviewReportBuilder(),
+                com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer());
     }
 
     private ReviewTask insertedTask() {
@@ -238,6 +292,20 @@ class ReviewExecutionServiceTest {
         public boolean claimForRecovery(String taskId) {
             return false;
         }
+
+        @Override
+        public Optional<ReviewTask> findByIdForUpdate(String taskId) {
+            return findById(taskId);
+        }
+
+        @Override
+        public boolean markFailedIfUnpublished(String taskId) {
+            statusHistory.add(ReviewTaskStatus.FAILED);
+            return true;
+        }
+
+        @Override
+        public boolean markPublishedIfAggregating(String taskId) { return false; }
 
         @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {

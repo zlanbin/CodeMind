@@ -10,6 +10,17 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         username: ${NACOS_USERNAME:nacos}
         password: ${NACOS_PASSWORD:nacos}
+  # integration 启动同样需要 PostgreSQL；与 review 共用实例，但迁移历史和业务表独立。
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:codemind}
+    username: ${POSTGRES_USER:codemind}
+    password: ${POSTGRES_PASSWORD:codemind}
+  flyway:
+    enabled: true
+    default-schema: integration
+    schemas: integration
+    locations: classpath:db/integration-migration
+    baseline-on-migrate: false
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
@@ -31,6 +42,10 @@ codemind:
   mq:
     topic:
       pull-request-received: codemind-pull-request-received
+      review-completed: codemind-review-completed
+      review-published: codemind-review-published
+    consumer-group:
+      review-completed: codemind-integration-review-completed
   scm:
     # 访问令牌只从环境变量注入，不写入仓库。空串为匿名（只能读公开仓库，限流很低）
     github-token: ${GITHUB_TOKEN:}

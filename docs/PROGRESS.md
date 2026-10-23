@@ -5,63 +5,52 @@
 
 ## 当前状态
 
-- 当前里程碑：**M7a 已完成**（入口链路：真实 PR 自动拉 diff 与源码 → 跨会话评审 → `AGGREGATING` + Finding）；
-  下一个会话进 **M7b**（回写 PR）
-- 上次更新：2026-10-22
-- 分支：`feat/m7a-entry-chain` 已推送（HEAD `c08a53b`），**未合并 master、未开 PR**
+- 当前里程碑：**M7b 已完成**（回写 PR：总结 + 行级评论 + `PUBLISHED`）。M7 整体完成，M0~M7 最小可演示版本就绪
+- 上次更新：2026-10-23
+- 分支：`feat/m7b-publish`（基于 master `2a52baa`），改动**全在工作区、未提交**，待用户说「代码提交」
 - 阻塞项：无
-- 未验证项：无（M5 / M6 遗留的真实 LLM IT 本次均实跑通过，见 M7a 节）
+- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过；真实写验收实跑通过，见 M7b 节）
 
 ## 下一个会话要做的事
 
-**进入 M7b：回写 PR（行级评论 + 总结报告 + `PUBLISHED`）。** 开场先决定 M7a 分支是否合并 master（或开 PR）。
+**先收尾 M7b 的提交**（若本会话未做）：`feat/m7b-publish` 提交、推送、开 PR 到 master。然后进 **M8：memory-service（L1/L2 记忆、混合检索）**。
 
-验证点（ROADMAP M7）：在自己的 GitHub 仓库提 PR，看到行级评论。
-**这是往外部系统写东西的里程碑**（WORKFLOW.md）：首次真实调用前停下，说清写什么、写到哪个仓库、等用户确认。
-只在 `zlanbin/codemind-sandbox` 上跑，不碰其它仓库。
+验证点（ROADMAP M8）：单测：写入与召回排序符合打分公式。ARCHITECTURE 7 是设计输入。
 
-要做的事：
-1. integration 侧回写：行级评论（`POST /repos/{owner}/{repo}/pulls/{n}/comments`，需 commit_id + path + line + side）
-   + PR 总结评论（issues comments）。`GithubScmClient` 目前只读，写调用加在同一适配器或另起 `ScmWriter` 端口
-2. 事件 `ReviewCompleted`（放 `codemind-common` 的 `event` 包）：review 在 AGGREGATING 后发布，integration 消费回写，
-   回写成功后状态推进 `PUBLISHED`（回传方式：再一个事件，或 integration 调 review 的 internal 端点，S1 定）
-3. `ReviewReport` 值对象（ARCHITECTURE 4 已列，未实现）：汇总 Finding 生成总结
-4. 行号落到 diff 范围：**实测 GlobalReduce 的 Finding 全是 `line=0`**（跨文件问题没有具体行），片级 Finding 的行号
-   也可能不在 hunk 内。按 hunk 校验，不合法的降级进总结评论
-5. 回写幂等表用 **V5**（V4 已被 M7a 的 `review_chunk` 主键修复占用）：同一 (task, fingerprint) 不重复发评论
-6. 噪声控制：实测 sandbox PR 一次产出 18~25 条，**同一问题被不同维度用不同措辞重复报**（如 `InventoryClient:11`
-   的 null 风险 3 条），fingerprint 按 snippet 判重拦不住。需要阈值 / 同文件同行合并，S1 定规则
-7. 树形递归归约（ARCHITECTURE 6.2 第 4 步）：仍未做，摘要过多时分批归约。可再往后留
+待用户决定的清理（不阻塞 M8）：
+- Task 5 留下的测试库 `codemind_task5_reviewfix`、`codemind_task5_clean_green` 是否删除
+- 本地分支 `feat/m7a-entry-chain`（已合并，远程已删）是否删除
+- sandbox PR #2 上有两个 CodeMind review：`5624353955`（上个会话，无测试标记，工具清不掉）与 `5624674315`（本会话）。留着不影响
 
 可直接复用：
-- 评审入口：`ReviewExecutionService.executeReview(String taskId) -> CrossSessionReviewResult`（同步）、
-  `submitAsync(String taskId)`；结果 `allFindings()` / `allDegradations()`
-- 读 GitHub：`ScmClient.fetchPullRequestDiff(repo, pr)` / `fetchFileContent(repo, path, ref)`（integration）；
-  review 侧 `ScmContentPort.fetchDiff` / `fetchNewSources`
-- 端到端 IT 模板：`RealPullRequestReviewIT`（自动清残留，三变量 + 两 key 齐备才跑）
+- 回写链路：`ReviewExecutionService` 到 `AGGREGATING` 后自动登记 outbox → MQ → integration `ReviewPublishService` → GitHub。
+  M9 反馈闭环要读 PR 评论时，integration 的 `GithubScmClient` 已有分页 `listReviews`
+- 报告：`ReviewReportBuilder.build(findings, diffFiles, sourcePaths, ReportPolicy)` → `ReviewReport`；
+  M9 的「记忆过滤」应插在 Findings 进 builder 之前（ARCHITECTURE 5 的 Dedup & Filter）
+- 运维：`docs/operations/M7b-publication.md`（状态查询、UNCERTAIN 核查、人工重置）
 
-跑验证的前置（2026-10-22 实测可用）：
+跑验证的前置（2026-10-23 实测可用）：
 ```bash
-# Docker Desktop 是用户级安装，助手可直接拉起（bash 里 & 启动会随 shell 退出，要走 PowerShell）
 powershell.exe -NoProfile -Command 'Start-Process -FilePath "C:\Users\35229\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe"'
 cd /d/pingshen/deploy && docker compose up -d          # 等 PG / Redis / Nacos healthy
 source ~/.codemind-secrets.env                         # 仓库外，含 GITHUB_TOKEN / CODEMIND_LLM_API_KEY / CODEMIND_TEST_*
 mvn -q package -DskipTests -pl codemind-integration -am
 cp codemind-integration/target/codemind-integration-0.1.0-SNAPSHOT.jar /tmp/codemind-integration-run.jar
-GITHUB_WEBHOOK_SECRET=<任意> java -jar /tmp/codemind-integration-run.jar &   # RealPullRequestReviewIT 直连 8081
-mvn verify
+GITHUB_WEBHOOK_SECRET=<任意> java -jar /tmp/codemind-integration-run.jar &   # RealPullRequestReviewIT 直连 8081；M7b 起 integration 也连 PG
+mvn verify                                             # 约 4~5 分钟；不跑真实写验收
 ```
 - 每条命令里 `source` 密钥文件，不要把值贴进对话
-- integration 从 jar **副本**启动：Windows 会锁住正在运行的 jar，挡住 `mvn package` 重打包
-- 改了 integration 代码要重打包并重启它，否则 RealPR IT 测的是旧代码
+- integration 从 jar **副本**启动（Windows 会锁运行中的 jar）；改了 integration 代码要重打包并重启
+- 密钥文件里 `CODEMIND_TEST_PR=1`（作者 zlanbin = token 用户），只够只读 IT。**真实写验收要用 PR #2**（作者 `lan-bin`），
+  命令行覆盖 `CODEMIND_TEST_PR=2 CODEMIND_TEST_HEAD_SHA=df8507c654a75f7e4a7809abf6192645dea4d8f6`，三阶段命令见运维文档
+- 全量 IT 在一个 JVM 里会耗尽 PG `max_connections`，已把测试 Hikari 池压到 2（`src/test/resources/application.properties`）
 
-安全提醒：`GITHUB_TOKEN` 与 LLM key 都进过聊天记录，**强烈建议轮换**。M7b 的 token 需要 `pull_requests: write`，
-只授 sandbox 仓库。
+安全提醒：`GITHUB_TOKEN` 与 LLM key 都进过聊天记录，**强烈建议轮换**。token 现有 `pull_requests: write`，只授 sandbox 仓库。
 
-**本机环境坑（2026-10-22 更新）：**
-- ~~`docker.exe` 对当前账号执行不了~~：M6 会话的记载已过时，本会话助手可直接调 `docker`，Docker Desktop 也能由助手拉起（命令见上）
-- 宿主机原生 PG 服务 `postgresql-x64-16` 占 5432 会与容器冲突（征兆「用户 codemind 密码认证失败」）。本会话查时为 STOPPED
-- 容器会无故消失（M6 会话遇到过），verify 失败先探端口 5432/6379/8848/9876
+**本机环境坑：**
+- 宿主机原生 PG 服务 `postgresql-x64-16` 占 5432 会与容器冲突（征兆「用户 codemind 密码认证失败」），需用户 `net stop`，助手无权限
+- Docker Desktop 会无故停掉、容器会消失，verify 失败先探端口 5432/6379/8848/9876
+- failsafe 的 `System.out` 不进控制台，在 `target/failsafe-reports/TEST-*.xml` 的 system-out 里
 
 **M6 代码已就绪，可直接复用的东西：**
 - 跨会话全流程入口：`DagOrchestrator.executeCrossSessionReview(buildChangeMapNode, planChunksNode, task, ctx)`
@@ -86,6 +75,77 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M7b 回写 PR（总结 + 行级评论 + PUBLISHED）—— 完成于 2026-10-23
+
+设计 `docs/plans/M7b-design.md`，计划 `docs/plans/M7b.md` 的 Task 1~10 全部落地。跨两个会话：前一会话做完 Task 1~10
+与首次真实写验收；本会话补运维文档、跑 S6 整体复审、修复 Task 10 的 4 项严重问题、重跑真实写验收与全量 verify。
+执行账本 `.superpowers/sdd/M7b/progress.md`（含各任务独立评审与修复记录）。
+
+改动范围（按任务）：
+
+- common：`event/ReviewCompleted`（含嵌套 `LineComment`，line>0）、`event/ReviewPublished`
+- review 报告：`domain/report`（`ReviewReport` / `InlineComment` / `SummaryItem` / `Reason` / `ReportPolicy` / `ReviewReportBuilder`），
+  `application/ReviewMarkdownRenderer`，`infrastructure/config/ReviewReportConfig`；`ReviewTask.assignReport`
+- review 交接：`V5__create_review_publication_outbox.sql`；`domain/event/DomainEventPublisher`、`domain/publication`；
+  `application/ReviewCompletionService`（锁 task 同事务登记）、`ReviewOutboxDispatcher`、`ReviewPublicationService`（回执 → PUBLISHED + ACK）；
+  `JdbcReviewOutboxRepository`（SKIP LOCKED 领取、租约、ACK 栅栏）、`PublicationSchedulingConfig`；
+  恢复 SQL 加 `NOT EXISTS outbox`、`markFailedIfUnpublished`；空 diff 早退推进到 AGGREGATING
+- integration 发送：`application/ReviewPublishService`（发前 IN_FLIGHT 栅栏、不确定只核查、422 降级 SUMMARY_ONLY）、
+  `ReviewPublicationBodies`（隐藏标记）；端口 `ScmReviewPublisher` / `PublicationLock`；`GithubScmClient` 加分页 `listReviews`、`createReview`；
+  `domain/publication` + `JdbcPublicationRepository` + 独立 schema 迁移 `db/integration-migration/V1`；`RedisPublicationLock`（续租）
+- MQ：两侧 `RocketMqDomainEventPublisher`、`ReviewCompletedListener`（integration）、`ReviewPublishedListener`（review）
+- 测试隔离：两模块 `src/test/resources/application.properties`（topic/group 加 `-test`、关后台投递与恢复、Hikari 池 2）
+- 真实写验收：`RealPullRequestPublishIT`（prepare / cleanup / publish 三阶段，`-Pgithub-write` 才跑）+ `support/` 下 sandbox 客户端与清理
+- 文档：`docs/operations/M7b-publication.md`、README「回写 PR」一节
+
+验证命令与结果（2026-10-23，真实 `GITHUB_TOKEN` + `CODEMIND_LLM_API_KEY`、真实中间件、integration 跑在 8081）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **在自己的 GitHub 仓库提 PR，看到行级评论**（ROADMAP M7） | `RealPullRequestPublishIT` prepare → publish（`zlanbin/codemind-sandbox` #2，作者 `lan-bin`，head `df8507c`） | **通过**。prepare 34s 真实 LLM，7 条意见 → 2 组行级 + 2 条总结；publish 后 GitHub 直接查询：review `5624674315` 带任务与测试标记，行级 `InventoryClient.java:11`（预埋 NPE）与 `OrderService.java:9`，均在新侧 hunk 内；库里 `PUBLISHED`、outbox 已 ACK、账本 `PUBLISHED/INLINE/inline_count=2` |
+| 重投不重复发 | 同上 publish 阶段的重投步骤 | **通过**。重发同一事件，独立消费组收到新回执后回查，review 仍只有本任务一个 |
+| 缺前置不跳过 | 不带密钥跑 `-Pgithub-write` | **通过**。`Failures: 1, Skipped: 0`，信息「缺少环境变量 GITHUB_TOKEN」 |
+| 清理门禁 | `SandboxReviewCleanupTest`（10 例） | **通过**。只读列出、确认集合不一致整体放弃、IN_FLIGHT/UNCERTAIN 不清 |
+| 普通回归不写真实 GitHub | 裸 `mvn verify` 日志 | **通过**。`RealPullRequestPublishIT` 出现 0 次；普通 IT 走 `-test` topic |
+| 全仓回归 | `mvn verify`（不带过滤、不带 profile） | **通过**。8 模块 BUILD SUCCESS，**390 测试 0 失败 0 错误 0 跳过**（common 6；gateway 1；integration 127 单测 + 28 IT；review 174 单测 + 51 IT；memory / rule / admin 各 1）。真实 LLM/GitHub IT 均实跑：RealPullRequestReviewIT 42s、CrossSessionMapReduceIT 71s、MultiAgentIntegrationIT 16s、ReviewAgentIT 9s |
+
+S6 整体复审（固定点 `2a52baa`，标准轴 / 规格轴两个独立子代理，本会话）：
+- 标准轴 0 硬违规，7 条判断题（见下方技术债），本里程碑不处理
+- 规格轴 4 项严重，全在 Task 10 验收 IT：缺前置用 `assumeTrue`、prepare 不经门禁就删评论、测试标记从未写入正文、
+  第 7 步断言缺失（新侧 diff / 命中预埋缺陷 / 重投不增 review）。已回 S5 修复并重跑真实验收
+- Review Focus 1~5（旧 IT 穿透、POST 后超时、恢复与回执竞争、分页与失锁、422 跨重启）核心实现与规格一致
+
+本里程碑踩到的真实环境问题（都不是生产代码缺陷）：
+- GitHub 对「token 用户评审自己开的 PR」返回 422，即使 `event=COMMENT`、无行级评论。改用第二账号 `lan-bin` 开的 PR #2
+- `commit_id` 必须是 40 位完整 SHA，短 SHA 报 `GitObjectID was provided invalid value`。验收现在强制校验 40 位
+- 验收 IT 继承了测试隔离 topic，消息静默落在无人订阅的 topic 上。已显式覆盖回生产 topic
+- 全量 IT 耗尽 PG 连接数，测试 Hikari 池压到 2
+
+遗留问题 / 技术债：
+- **SUMMARY_ONLY 被 422 拒后回 `READY`，outbox 每 60s 重投 → 无限重试调 GitHub**（不产生写入）。需要终态（如 `REJECTED`）+ 告警，属设计改动，M9 前处理
+- 结果不明的 `IN_FLIGHT/UNCERTAIN` 没有自动重置，只能人工按运维文档处理（B 策略的有意代价：发前落库后、POST 前退出也会卡住）
+- `GithubScmClient` 遇 422 不记录响应体，诊断要临时加日志（本里程碑两次）。可加脱敏后的 `message` 字段
+- Task 8 I-5（Important）：「查询在前、outbox 后到」与「回执与 claim 竞争不把 PUBLISHED 改回 FAILED」两条场景用例未补；
+  N-2（Important）：两条反向竞争用例的胜方用手抄 SQL 副本，与生产常量无同步；I-3：`readCommittedTransactions` 未设 `validateExistingTransaction(true)`；N-5 断言偏弱
+- Task 7 I2/I3/M1~M4/X1~X4：部分状态机场景断言不全（原报告 `task-7-review-report.txt`）
+- Task 9 R-2~R-5：异常消息未校验、`RocketMqDomainEventPublisher` 的 `@Value` 未被 IT 覆盖、Hikari 池 2 无余量、风格残留
+- Task 6 没有单任务独立评审（账本早期两处说法矛盾，已更正），只被 S6 整体复审覆盖
+- integration 普通 IT 未替换 GitHub 写端口（监听 `-test` topic，实际风险低）
+- S6 标准轴判断题：`GithubScmClient` 同时承担读写两端口且 onStatus 处理重复 3 处；`JdbcReviewTaskRepository:172/208` 锁行逻辑重复；
+  `ReviewExecutionService` 空 diff 手工推进状态与编排器重复；`ReviewPublishService` 用裸 HTTP 状态码判平台语义；
+  `ReviewPublicationService` / `ReviewPublishService` 易混；端口位置不统一（`PublicationLock` 在 application/port，`PublicationRepository` 在 domain）
+- `findings` 仍未落库，报告只经 outbox payload 持久化
+- M7a 遗留仍在：internal 端点无鉴权且经网关可达；首次触发路径非原子（回写侧已由账本兜住外部副作用）
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**。3.3 补回写链路（outbox、账本、锁、写端口、保证边界、事件表加 `ReviewPublished`）；
+4 补 `ReviewReport` 结构与分流规则；5 DAG 图 Publish 节点、恢复边界（有 outbox 不算卡死）；8 加两条决策。
+
+与计划 / 设计的偏差：
+- Task 10 两阶段改为三阶段：清理拆成独立的 `cleanup` 阶段，删除必须带 `-Dcodemind.github-write.confirm-delete` 且与重新计算的候选完全一致
+- 「至少一条覆盖 `i <= size()`」改为参数 `-Dcodemind.github-write.expect-line`：PR #2 只有 `InventoryClient:11` 一处预埋缺陷
+- 测试标记在 prepare 写入 outbox 时追加到正文（`jsonb_set`，限 `attempts=0`），而不是另建测试 renderer：`ReviewMarkdownRenderer` 是 final 类，
+  且这样仍满足「存入 outbox 后投递时不改 payload」
 
 ### M7a 入口链路（真实 PR → 拉 diff 与源码 → 跨会话评审 → AGGREGATING）—— 完成于 2026-10-22
 
@@ -635,6 +695,12 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-22 | M7a | ScmException → 502 另建 `PullRequestContentExceptionHandler`，不改 `WebhookExceptionHandler` | 后者按 `assignableTypes` 限定到 webhook 控制器，放宽会让 401/400 映射溢出到新端点 |
 | 2026-10-22 | M7a | `RealPullRequestReviewIT` 自动清残留 + `assertTrue`，不用 `assumeTrue(insertIfAbsent)` | 跳过的 IT 不算验证通过；残留让三个核心验证点被静默绕过（S6 规格轴发现） |
 | 2026-10-22 | M7a | 恢复驱动 `CODEMIND_RECOVERY_ENABLED` 默认关 | 开着会让所有 IT 上下文里多一个扫库定时任务；逻辑由直接调 `recoverStaleTasks()` 的测试覆盖 |
+| 2026-10-22 | M7b | review outbox + integration 独立 schema 发送账本，结果不明只核查不重发 | 外部写入做错要手工清理，宁可人工处理 `UNCERTAIN` 也不重复发评论；两服务各管自己的表，不做跨服务事务（判定门确认） |
+| 2026-10-22 | M7b | integration 起依赖 PostgreSQL，Flyway 用独立 schema `integration` 与独立 locations | 与 review 的 public V1~V5 历史互不扫描；不启用 baseline 掩盖不匹配 |
+| 2026-10-23 | M7b | 真实写验收改用第二账号 `lan-bin` 开的 PR #2 | GitHub 不允许 token 用户评审自己的 PR（422，即使 COMMENT、无行级评论）。生产与演示的发布账号须与 PR 作者不同 |
+| 2026-10-23 | M7b | 验收 IT 三阶段（prepare / cleanup / publish），删除须带确认 id 集合 | S6 规格轴发现 prepare 未经门禁就删评论；拆出独立阶段让「清理」与「发布」各自授权 |
+| 2026-10-23 | M7b | 显式验收缺前置判失败，不 `assumeTrue` | 跳过会让 `-Pgithub-write` 什么都没验也亮绿灯（S6 规格轴发现，计划 Global Constraints 原本就要求） |
+| 2026-10-23 | M7b | SUMMARY_ONLY 422 无限重试留作技术债 | 修复需要新终态与告警，属设计改动；当前只会重复调 GitHub、不会重复写入 |
 
 ## 环境与常用命令
 

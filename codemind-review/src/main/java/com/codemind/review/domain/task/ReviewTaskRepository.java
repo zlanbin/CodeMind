@@ -23,6 +23,15 @@ public interface ReviewTaskRepository {
      */
     Optional<ReviewTask> findById(String taskId);
 
+    /** 在调用方事务内锁住任务；完成交接、恢复与回执使用相同锁序。 */
+    Optional<ReviewTask> findByIdForUpdate(String taskId);
+
+    /** 已保存发布请求或已发布的任务不可退回 FAILED。 */
+    boolean markFailedIfUnpublished(String taskId);
+
+    /** 持有 task 行锁的事务内，从 AGGREGATING 条件推进。 */
+    boolean markPublishedIfAggregating(String taskId);
+
     /**
      * 更新任务状态，同时刷新 updated_at（M3 状态流转落库）。
      */

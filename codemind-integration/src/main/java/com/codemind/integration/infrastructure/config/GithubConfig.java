@@ -1,8 +1,8 @@
 package com.codemind.integration.infrastructure.config;
 
-import com.codemind.integration.application.port.ScmClient;
 import com.codemind.integration.infrastructure.github.GithubScmClient;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.convert.DurationStyle;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
@@ -26,13 +26,14 @@ public class GithubConfig {
      * @param timeout 连接与读取超时
      */
     @Bean
-    public ScmClient scmClient(
+    public GithubScmClient githubScmClient(
             @Value("${codemind.scm.github-api-base-url}") String baseUrl,
             @Value("${codemind.scm.github-token:}") String token,
-            @Value("${codemind.scm.request-timeout:20s}") Duration timeout) {
+            @Value("${codemind.scm.request-timeout:20s}") String timeout) {
+        Duration duration = DurationStyle.detectAndParse(timeout);
         ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.defaults()
-                .withConnectTimeout(timeout)
-                .withReadTimeout(timeout);
+                .withConnectTimeout(duration)
+                .withReadTimeout(duration);
         RestClient.Builder builder = RestClient.builder()
                 .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(settings));
         return new GithubScmClient(builder, baseUrl, token);

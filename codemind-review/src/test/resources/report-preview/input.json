@@ -1,0 +1,15 @@
+{
+  "policy": {"minInlineSeverity": "MAJOR", "maxInline": 10},
+  "files": [{
+    "oldPath": "src/Inventory.java", "newPath": "src/Inventory.java", "changeType": "MODIFIED",
+    "hunks": [{"oldStart": 10, "oldCount": 3, "newStart": 10, "newCount": 3,
+      "lines": [" context", "-for (int i = 0; i < size(); i++)", "+for (int i = 0; i <= size(); i++)", " context"]}]
+  }],
+  "findings": [
+    {"file":"src/Inventory.java","line":11,"severity":"MINOR","category":"TEST","message":"缺少边界测试","suggestion":"增加空集合用例","fingerprint":"preview-test"},
+    {"file":"src/Inventory.java","line":0,"severity":"INFO","category":"DESIGN","message":"文件级说明","suggestion":"补充设计说明","fingerprint":"preview-design"},
+    {"file":"src/Inventory.java","line":11,"severity":"MAJOR","category":"SECURITY","message":"输入未校验","suggestion":"校验输入","fingerprint":"preview-security"},
+    {"file":"src/Inventory.java","line":11,"severity":"CRITICAL","category":"CORRECTNESS","message":"边界越界","suggestion":"改用 < size()","fingerprint":"preview-correctness"}
+  ],
+  "degradations": ["PERFORMANCE 超时"]
+}

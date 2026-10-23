@@ -13,6 +13,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 })
 class ReviewApplicationIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     @Test
     void contextLoads() {
     }

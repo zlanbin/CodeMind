@@ -4,6 +4,7 @@ import com.codemind.review.domain.agent.ChunkSummary;
 import com.codemind.review.domain.changemap.ChangeMap;
 import com.codemind.review.domain.chunk.ReviewChunk;
 import com.codemind.review.domain.finding.Finding;
+import com.codemind.review.domain.report.ReviewReport;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ public class ReviewTask {
 
     private ReviewTaskStatus status;
     private ChangeMap changeMap;
+    private ReviewReport report;
 
     private ReviewTask(String taskId, String repo, int prNumber, String headSha, String baseSha,
                        String sourceEventId, ReviewTaskStatus status, Instant createdAt) {
@@ -122,6 +124,16 @@ public class ReviewTask {
     /** 全局变更地图；未构建时为 null。 */
     public ChangeMap changeMap() {
         return changeMap;
+    }
+
+    /** 挂上发布前报告（M7b），重复调用以最新一次为准；不改变 findings、chunks 或任务状态。 */
+    public void assignReport(ReviewReport newReport) {
+        this.report = Objects.requireNonNull(newReport, "report");
+    }
+
+    /** 内存报告；未生成时为 null。 */
+    public ReviewReport report() {
+        return report;
     }
 
     /** 挂上某个切片的结构化摘要（M6）。同 chunkId 重复调用以最新一次为准（续跑重评场景）。 */

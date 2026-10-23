@@ -27,6 +27,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @SpringBootTest
 class ReviewAgentIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     // 含明显问题（空指针风险 + 异常吞没）的 diff，诱导模型产出 Finding
     private static final String DIFF = """
             diff --git a/PaymentService.java b/PaymentService.java

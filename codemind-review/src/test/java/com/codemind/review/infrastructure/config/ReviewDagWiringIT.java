@@ -25,6 +25,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 })
 class ReviewDagWiringIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     @Autowired
     private DagOrchestrator dagOrchestrator;
 
@@ -40,12 +47,42 @@ class ReviewDagWiringIT {
     @Autowired
     private com.fasterxml.jackson.databind.ObjectMapper sharedObjectMapper;
 
+    @Autowired
+    private com.codemind.review.domain.publication.ReviewOutboxRepository reviewOutboxRepository;
+
+    @Autowired
+    private com.codemind.review.application.ReviewOutboxDispatcher reviewOutboxDispatcher;
+
+    @Autowired
+    private com.codemind.review.application.ReviewCompletionService reviewCompletionService;
+
+    @Autowired
+    private com.codemind.review.application.ReviewPublicationService reviewPublicationService;
+
+    @Autowired
+    private com.codemind.review.interfaces.mq.ReviewPublishedListener reviewPublishedListener;
+
     @Test
     void contextLoadsWithAllDagBeans() {
         assertNotNull(dagOrchestrator, "DagOrchestrator 应装配成 bean（M3~M6 一直只在测试里 new）");
         assertNotNull(dagScheduler);
         assertNotNull(reviewExecutionService);
         assertNotNull(scmContentPort, "Feign 适配器应实现 ScmContentPort");
+    }
+
+    /**
+     * S6 评审 I-1（Task 9）：这个 IT 的注释自述「M5 曾因只改 Config 不验装配而首次 verify 失败，
+     * 这个 IT 就是为此设的」——Task 9 正好新增了 MQ bean 和一批 outbox/发布装配，当时只改了
+     * @TestBean 的 name，没有扩这条断言，没有守住它本该守的场景。
+     */
+    @Test
+    void contextLoadsWithM7bPublicationBeans() {
+        assertNotNull(reviewOutboxRepository, "V5 outbox 仓储应装配成 bean");
+        assertNotNull(reviewOutboxDispatcher, "投递器应装配成 bean（PublicationSchedulingConfig）");
+        assertNotNull(reviewCompletionService, "完成交接服务应装配成 bean");
+        assertNotNull(reviewPublicationService, "发布回执服务应装配成 bean");
+        assertNotNull(reviewPublishedListener, "ReviewPublished 消费者应装配成 bean");
+        assertNotNull(publicationTestPublisher, "DomainEventPublisher 唯一候选应是测试替身而非真实 MQ 发布器");
     }
 
     /**

@@ -47,6 +47,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 })
 class RealPullRequestReviewIT {
 
+    @org.springframework.test.context.bean.override.convention.TestBean(name = "rocketMqDomainEventPublisher", methodName = "publicationTestPublisher")
+    private com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher;
+
+    static com.codemind.review.domain.event.DomainEventPublisher publicationTestPublisher() {
+        return new com.codemind.review.support.RecordingDomainEventPublisher();
+    }
+
     @Autowired
     private ReviewExecutionService reviewExecutionService;
 
@@ -58,6 +65,12 @@ class RealPullRequestReviewIT {
 
     @Autowired
     private JdbcClient jdbcClient;
+
+    @Autowired
+    private com.codemind.review.application.ReviewOutboxDispatcher dispatcher;
+
+    @Autowired
+    private com.codemind.review.domain.publication.ReviewOutboxRepository outbox;
 
     @Test
     void realPullRequestFlowsThroughToAggregating() {
@@ -124,11 +137,20 @@ class RealPullRequestReviewIT {
                             + "，diff 文件: " + filesInDiff);
         }
 
+        var request = outbox.findByTaskId(task.taskId()).orElseThrow().event();
+        assertEquals(headSha, request.headSha());
+        assertTrue(dispatcher.dispatchTask(task.taskId()));
+        assertTrue(((com.codemind.review.support.RecordingDomainEventPublisher) publicationTestPublisher)
+                .events().contains(request), "只读 IT 的出口只能是记录型替身");
         System.out.println("降级信息: " + result.allDegradations());
     }
 
     /** 按子表 → 主表的顺序删（review_chunk 外键指向 review_task；node_run 的 task_id 是 varchar 无外键）。 */
     private void deleteExistingTasks(String repo, int pr, String headSha) {
+        jdbcClient.sql("""
+                delete from review_publication_outbox where task_id in (select task_id from review_task
+                    where repo=:repo and pr_number=:pr and head_sha=:sha)
+                """).param("repo", repo).param("pr", pr).param("sha", headSha).update();
         jdbcClient.sql("""
                 delete from node_run where task_id in (select cast(task_id as varchar) from review_task
                     where repo = :repo and pr_number = :pr and head_sha = :sha)

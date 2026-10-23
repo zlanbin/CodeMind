@@ -40,20 +40,10 @@ public class ReviewExecutionService {
     private final ChunkBudget chunkBudget;
     private final ExecutorService reviewExecutor;
 
-    /** 测试用：不带线程池，只能同步执行。 */
-    public ReviewExecutionService(ScmContentPort scmContentPort,
-                                  ReviewTaskRepository taskRepository,
-                                  DagOrchestrator orchestrator,
-                                  ChangeMapAgent changeMapAgent,
-                                  SemanticChunker chunker,
-                                  ChunkRepository chunkRepository,
-                                  ChunkBudget chunkBudget) {
-        this(scmContentPort, taskRepository, orchestrator, changeMapAgent, chunker,
-                chunkRepository, chunkBudget, null);
-    }
-
-    /** Spring 用这个：有两个构造器时必须显式指明注入哪个。 */
-    @Autowired
+    private final ReviewCompletionService completion;
+    private final com.codemind.review.domain.report.ReviewReportBuilder reportBuilder;
+    private final com.codemind.review.domain.report.ReportPolicy reportPolicy;
+    private final ReviewMarkdownRenderer renderer;
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -61,7 +51,11 @@ public class ReviewExecutionService {
                                   SemanticChunker chunker,
                                   ChunkRepository chunkRepository,
                                   ChunkBudget chunkBudget,
-                                  ExecutorService reviewExecutor) {
+                                  ExecutorService reviewExecutor,
+                                  ReviewCompletionService completion,
+                                  com.codemind.review.domain.report.ReviewReportBuilder reportBuilder,
+                                  com.codemind.review.domain.report.ReportPolicy reportPolicy,
+                                  ReviewMarkdownRenderer renderer) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -69,7 +63,11 @@ public class ReviewExecutionService {
         this.chunker = Objects.requireNonNull(chunker, "chunker");
         this.chunkRepository = Objects.requireNonNull(chunkRepository, "chunkRepository");
         this.chunkBudget = Objects.requireNonNull(chunkBudget, "chunkBudget");
-        this.reviewExecutor = reviewExecutor;
+        this.reviewExecutor = Objects.requireNonNull(reviewExecutor, "reviewExecutor");
+        this.completion = Objects.requireNonNull(completion, "completion");
+        this.reportBuilder = Objects.requireNonNull(reportBuilder, "reportBuilder");
+        this.reportPolicy = Objects.requireNonNull(reportPolicy, "reportPolicy");
+        this.renderer = Objects.requireNonNull(renderer, "renderer");
     }
 
     /**
@@ -127,7 +125,27 @@ public class ReviewExecutionService {
             Node planNode = new PlanChunksNode("plan-chunks", chunker,
                     chunkRepository, taskRepository, chunkBudget);
 
-            return orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, context);
+            CrossSessionReviewResult result;
+            if (diffText.isBlank()) {
+                task.transitionTo(ReviewTaskStatus.PLANNING);
+                taskRepository.updateStatus(taskId, ReviewTaskStatus.PLANNING);
+                task.transitionTo(ReviewTaskStatus.REVIEWING);
+                taskRepository.updateStatus(taskId, ReviewTaskStatus.REVIEWING);
+                task.transitionTo(ReviewTaskStatus.AGGREGATING);
+                taskRepository.updateStatus(taskId, ReviewTaskStatus.AGGREGATING);
+                result = new CrossSessionReviewResult(null, Map.of(),
+                        com.codemind.review.domain.agent.GlobalReduceResult.degraded("变更为空，无可评审内容", 0));
+            } else {
+                result = orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, context);
+            }
+            var report = reportBuilder.build(result.allFindings(), diffFiles, result.allDegradations(), reportPolicy);
+            task.assignReport(report);
+            var comments = report.inline().stream().map(comment ->
+                    new com.codemind.common.event.ReviewCompleted.LineComment(comment.path(), comment.line(),
+                            renderer.renderInline(comment))).toList();
+            completion.register(com.codemind.common.event.ReviewCompleted.of(task.taskId(), task.repo(),
+                    task.prNumber(), task.headSha(), renderer.renderSummary(report), comments));
+            return result;
         } catch (Exception e) {
             markFailed(task);
             throw new IllegalStateException("评审执行失败 taskId=" + taskId, e);
@@ -149,8 +167,10 @@ public class ReviewExecutionService {
     /** 标记失败并落库。状态机不允许从当前状态转 FAILED 时只记日志，不掩盖原异常。 */
     private void markFailed(ReviewTask task) {
         try {
-            task.transitionTo(ReviewTaskStatus.FAILED);
-            taskRepository.updateStatus(task.taskId(), ReviewTaskStatus.FAILED);
+            if (taskRepository.markFailedIfUnpublished(task.taskId())
+                    && task.status().canTransitionTo(ReviewTaskStatus.FAILED)) {
+                task.transitionTo(ReviewTaskStatus.FAILED);
+            }
         } catch (RuntimeException e) {
             log.warn("标记任务失败时出错 taskId={} 当前状态={}", task.taskId(), task.status(), e);
         }

@@ -104,11 +104,28 @@ review → integration 已落地（M7a）：
 | 事件 | 生产者 → 消费者 | 用途 |
 |---|---|---|
 | `PullRequestReceived` | integration → review | 创建评审任务 |
-| `ReviewCompleted` | review → integration | 回写评论 |
+| `ReviewCompleted` | review → integration | 回写评论（M7b，topic `codemind-review-completed`） |
+| `ReviewPublished` | integration → review | 回写成功回执，review 推进 `PUBLISHED`（M7b，topic `codemind-review-published`） |
 | `FindingFeedbackReceived` | integration → memory | 反馈学习 |
 | `ReviewCompleted` | review → memory | 沉淀任务记忆 |
 
-事件定义统一放在 `codemind-common` 的 `event` 包。
+事件定义统一放在 `codemind-common` 的 `event` 包。`ReviewCompleted` 携带已渲染好的总结正文与
+`List<LineComment(path, line>0, body)>`，不引用 review 的领域对象；integration 只负责发送，不再调 LLM。
+
+回写链路（M7b，运维见 `docs/operations/M7b-publication.md`）：
+
+- review 侧 **transactional outbox**（`review_publication_outbox`，V5）：评审到 `AGGREGATING` 后，锁 task 行、
+  同事务登记请求；后台 dispatcher（30s 扫描、批量 50、租约 120s、未 ACK 每 60s 重投同一 eventId）在事务外发 MQ。
+  收到 `ReviewPublished` 后，同事务把 task 推进 `PUBLISHED` 并 ACK outbox，锁序固定 task → outbox
+- integration 侧**发送账本**（独立 schema `integration.review_publication`，自带 Flyway 历史，M7b 起 integration 依赖 PG）：
+  `READY → IN_FLIGHT → PUBLISHED`，结果不明时 `UNCERTAIN`。**POST 前先 CAS 落 `IN_FLIGHT`**；每次先按隐藏标记
+  `<!-- codemind:task=<id> -->` 分页查已有 review（>10 页拒绝判定），查到只补回执。`IN_FLIGHT/UNCERTAIN` 查不到标记也
+  **不自动重发**，只能人工核查后重置。明确拒绝（4xx）回 `READY`；`INLINE` 遇 422 先持久化 `SUMMARY_ONLY` 再发一次
+- Redis 续租锁 `codemind:publish-lock:<taskId>`（TTL 120s / 30s 续租）只降并发，正确性靠账本 CAS
+- 写端口 `ScmReviewPublisher`（application/port）与读端口共用同一个 `GithubScmClient` 实例：
+  `POST pulls/{n}/reviews`（`event=COMMENT`、`side=RIGHT`、`commit_id` 必须是 40 位完整 SHA）
+- 保证边界：至少一次投递 + 标记查重，**不承诺端到端 exactly-once**。GitHub 不允许 token 用户评审自己开的 PR（422），
+  发布账号须与 PR 作者不同
 
 ## 4. 核心领域模型（review-service）
 
@@ -121,8 +138,14 @@ ReviewTask (聚合根)
  ├─ Map<chunkId, ChunkSummary>    # 各片结构化摘要（评审阶段产物，按 chunkId 关联，见 6.4）
  ├─ List<Finding>                 # 片级去重后 + GlobalReduce 的跨文件意见
  │    └─ file, line, severity, category, message, suggestion, fingerprint
- └─ ReviewReport (值对象)
+ └─ ReviewReport (值对象)          # M7b：inline 组 + summary 项 + 降级信息
+      └─ List<InlineComment>(path, line, 合并的 Findings), List<SummaryItem>(Finding, Reason)
 ```
+
+`ReviewReportBuilder`（纯领域）按 `ReportPolicy`（默认 MAJOR 门槛、最多 10 组，`CODEMIND_MIN_INLINE_SEVERITY` /
+`CODEMIND_MAX_INLINE`）把 Findings 分流：同文件同行合并成一组，门槛按组最高严重度判。进总结的都记 `Reason`：
+`NO_LINE`（`line=0`）、`OUTSIDE_DIFF`（行不在新侧 hunk 内、文件不在 diff 或已删除）、`BELOW_THRESHOLD`、`OVER_LIMIT`。
+排序稳定，同一输入产出同一报告。markdown 渲染在 application 层。
 
 方法限定名格式：`外层类名#方法名(参数类型, ...)`，如 `OrderService#cancel(int)`。带参数类型是 M6 的
 必要条件——否则无法区分重载，也无法判断跨文件签名是否一致。不含包名、不消解嵌套类同名歧义。
@@ -155,11 +178,11 @@ BuildChangeMap → PlanChunks
                               │
                      Dedup & Filter（记忆过滤，留 M9）
                               │
-                           Publish（留 M7）
+                     Report → Outbox → Publish（M7b，DAG 外，见 3.3）
 ```
 
 M6 已落地：`BuildChangeMap → PlanChunks → 4N 个子会话 → N 个 ChunkReduce → GlobalReduce`，
-状态随之推进 `PLANNING → REVIEWING → AGGREGATING`（`PUBLISHED` 的入口是回写 PR，属 M7）。
+状态随之推进 `PLANNING → REVIEWING → AGGREGATING`（`PUBLISHED` 的入口是回写 PR，M7b 落地）。
 `BuildChangeMap` 排在 `PlanChunks` 之前（原图为之后）：两者无数据依赖（地图要的是全量文件列表与签名，
 与切片结果无关），但地图先行可在任何子会话启动前就落进共享状态。diff 解析不单列节点，
 由两个节点各自调用 `DiffParser`（纯函数，无副作用）。
@@ -173,6 +196,9 @@ M7a 接上入口链路（此前 DAG 只在测试里被调用）：`PullRequestRe
 定时扫「`updated_at` 与该任务最新 `node_run` 活动**两者都**早于阈值（默认 15m）」的任务，单条 SQL 原子抢占
 （置 `FAILED`，多实例只有一个抢到）后重提。默认关（`CODEMIND_RECOVERY_ENABLED`）。判定是启发式的，
 真慢的任务会被重启一次，代价由 checkpoint 兜住；更准的节点级心跳未做。
+M7b 起 `AGGREGATING` 不再等于「还在跑」：**已有 outbox 的任务已完成交接**，`findStaleInProgress` 与
+`claimForRecovery` 都带 `NOT EXISTS outbox` 条件，执行服务的失败回退也只走 `markFailedIfUnpublished`，
+不会把已交接或已发布的任务抢回 `FAILED`。空 diff 早退路径同样推进到 `AGGREGATING` 再交接。
 
 Checkpoint 序列化：节点结果以 `Object` 存取，用开了 default typing（`EVERYTHING`，record 是 final 类）的
 **私有** `ObjectMapper` 把具体类型写进 JSON，类型白名单只放 `com.codemind.` 与 `java.util.`。
@@ -288,3 +314,5 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 | 服务控制在 5+1 个 | 单人可完成，边界讲得清 |
 | GlobalReduce 只读摘要 | 控制上下文规模，摘要质量通过标注 PR 集合评估 |
 | 只有 integration 直连 GitHub，review 经 internal 端点取内容 | GitHub Token 只在一个服务里；review 不感知 SCM 平台，换 GitLab 只动 integration |
+| 回写走 review outbox + integration 独立 schema 账本，结果不明只核查不重发（M7b） | 外部写入做错要手工清理：宁可停在 `UNCERTAIN` 等人工，也不重复发评论。两个服务各管自己的表，不跨服务事务 |
+| 报告规则与渲染在 review，integration 只发送 | 噪声控制（合并、门槛、上限）是评审语义；换 SCM 平台不用重做 |
