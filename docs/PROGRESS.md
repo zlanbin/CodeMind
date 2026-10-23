@@ -7,19 +7,18 @@
 
 - 当前里程碑：**M7b 已完成**（回写 PR：总结 + 行级评论 + `PUBLISHED`）。M7 整体完成，M0~M7 最小可演示版本就绪
 - 上次更新：2026-10-23
-- 分支：`feat/m7b-publish`（基于 master `2a52baa`），改动**全在工作区、未提交**，待用户说「代码提交」
+- 分支：M7b 已合并进 master（commit `744b988`，PR #2 merge `ceab94b`），`feat/m7b-publish` 本地与远程均已删除
 - 阻塞项：无
 - 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过；真实写验收实跑通过，见 M7b 节）
 
 ## 下一个会话要做的事
 
-**先收尾 M7b 的提交**（若本会话未做）：`feat/m7b-publish` 提交、推送、开 PR 到 master。然后进 **M8：memory-service（L1/L2 记忆、混合检索）**。
+**进入 M8：memory-service（L1/L2 记忆、混合检索）。** 从 master 拉新分支开工。
 
 验证点（ROADMAP M8）：单测：写入与召回排序符合打分公式。ARCHITECTURE 7 是设计输入。
 
-待用户决定的清理（不阻塞 M8）：
-- Task 5 留下的测试库 `codemind_task5_reviewfix`、`codemind_task5_clean_green` 是否删除
-- 本地分支 `feat/m7a-entry-chain`（已合并，远程已删）是否删除
+清理状态：
+- 已删（2026-10-23）：Task 5 测试库 `codemind_task5_reviewfix`、`codemind_task5_clean_green`；本地分支 `feat/m7a-entry-chain`
 - sandbox PR #2 上有两个 CodeMind review：`5624353955`（上个会话，无测试标记，工具清不掉）与 `5624674315`（本会话）。留着不影响
 
 可直接复用：
