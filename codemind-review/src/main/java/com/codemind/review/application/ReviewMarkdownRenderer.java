@@ -1,5 +1,6 @@
 package com.codemind.review.application;
 
+import com.codemind.common.event.FindingMarker;
 import com.codemind.review.domain.finding.Finding;
 import com.codemind.review.domain.finding.Severity;
 import com.codemind.review.domain.report.InlineComment;
@@ -56,6 +57,10 @@ public final class ReviewMarkdownRenderer {
                 .append(" · 合并 ").append(comment.merged().size()).append(" 条意见\n\n");
         for (Finding finding : comment.merged()) {
             appendFinding(markdown, finding);
+            // M9：每条 Finding 带隐藏标记，反馈回来时据此对回指纹与类别（ARCHITECTURE 7.2）
+            if (FindingMarker.isFormattable(finding.fingerprint(), finding.category().name())) {
+                markdown.append(FindingMarker.format(finding.fingerprint(), finding.category().name())).append("\n\n");
+            }
         }
         return markdown.toString();
     }

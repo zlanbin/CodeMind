@@ -1,6 +1,7 @@
 package com.codemind.integration.infrastructure.mq;
 
 import com.codemind.common.event.DomainEvent;
+import com.codemind.common.event.FindingFeedbackReceived;
 import com.codemind.common.event.PullRequestReceived;
 import com.codemind.common.event.ReviewPublished;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,7 +28,7 @@ class RocketMqDomainEventPublisherTest {
     @Test
     void sendsPullRequestReceivedAsJsonStringWithEventIdKey() {
         var publisher = new RocketMqDomainEventPublisher(rocketMQTemplate, mapper,
-                "pr-received-topic", "review-published-topic");
+                "pr-received-topic", "review-published-topic", "finding-feedback-topic");
         PullRequestReceived event = PullRequestReceived.of("delivery-1", "opened",
                 "owner/repo", 7, "head", "base");
 
@@ -42,7 +43,7 @@ class RocketMqDomainEventPublisherTest {
     @Test
     void sendsReviewPublishedAsJsonStringWithEventIdKey() {
         var publisher = new RocketMqDomainEventPublisher(rocketMQTemplate, mapper,
-                "pr-received-topic", "review-published-topic");
+                "pr-received-topic", "review-published-topic", "finding-feedback-topic");
         ReviewPublished event = ReviewPublished.of("task-1", 3, false);
 
         publisher.publish(event);
@@ -53,9 +54,24 @@ class RocketMqDomainEventPublisherTest {
     }
 
     @Test
+    void sendsFindingFeedbackToItsOwnTopicAndRoundTrips() throws Exception {
+        var publisher = new RocketMqDomainEventPublisher(rocketMQTemplate, mapper,
+                "pr-received-topic", "review-published-topic", "finding-feedback-topic");
+        FindingFeedbackReceived event = FindingFeedbackReceived.of("owner/repo", 2, 55L,
+                FindingFeedbackReceived.FeedbackType.THUMBS_DOWN, 9L, "lan-bin", null, "意见",
+                java.util.List.of(new FindingFeedbackReceived.FindingRef("c".repeat(64), "STYLE")));
+
+        publisher.publish(event);
+
+        var captor = captureMessage(rocketMQTemplate, "finding-feedback-topic");
+        assertEquals(event, mapper.readValue((String) captor.getPayload(), FindingFeedbackReceived.class));
+        assertEquals(event.eventId(), captor.getHeaders().get("KEYS"));
+    }
+
+    @Test
     void instantRoundTripsThroughJsonWithoutException() throws Exception {
         var publisher = new RocketMqDomainEventPublisher(rocketMQTemplate, mapper,
-                "pr-received-topic", "review-published-topic");
+                "pr-received-topic", "review-published-topic", "finding-feedback-topic");
         ReviewPublished event = ReviewPublished.of("task-1", 1, false);
 
         publisher.publish(event);
@@ -69,7 +85,7 @@ class RocketMqDomainEventPublisherTest {
     @Test
     void unknownEventTypeIsRejected() {
         var publisher = new RocketMqDomainEventPublisher(rocketMQTemplate, mapper,
-                "pr-received-topic", "review-published-topic");
+                "pr-received-topic", "review-published-topic", "finding-feedback-topic");
         DomainEvent unknown = new DomainEvent() {
             public String eventId() { return "x"; }
             public java.time.Instant occurredAt() { return java.time.Instant.now(); }

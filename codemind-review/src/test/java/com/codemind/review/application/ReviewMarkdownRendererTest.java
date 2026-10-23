@@ -1,5 +1,7 @@
 package com.codemind.review.application;
 
+import com.codemind.common.event.FindingFeedbackReceived.FindingRef;
+import com.codemind.common.event.FindingMarker;
 import com.codemind.review.domain.finding.Category;
 import com.codemind.review.domain.finding.Finding;
 import com.codemind.review.domain.finding.Severity;
@@ -64,6 +66,21 @@ class ReviewMarkdownRendererTest {
         assertThat(markdown).contains("CORRECTNESS", "CRITICAL", "边界越界", "改用 < size()",
                 "SECURITY", "MAJOR", "输入未校验", "校验输入", "TEST", "MINOR", "缺少边界测试", "增加空集合用例");
         assertThat(markdown).doesNotContain("codemind:task=");
+    }
+
+    @Test
+    void inlineCarriesOneHiddenMarkerPerRealFinding() {
+        Finding real = Finding.of("src/Inventory.java", 11, Severity.MAJOR, Category.CORRECTNESS, "越界", "改 <",
+                "for (i = 0; i <= size(); i++)");
+        Finding second = Finding.of("src/Inventory.java", 11, Severity.MINOR, Category.TEST, "缺测试", "补用例", "x");
+        Finding legacy = finding(11, Severity.MINOR, Category.STYLE, "无合法指纹", "");
+
+        String markdown = renderer.renderInline(new InlineComment("src/Inventory.java", 11, Severity.MAJOR,
+                List.of(real, second, legacy)));
+
+        assertThat(FindingMarker.parseAll(markdown)).containsExactly(
+                new FindingRef(real.fingerprint(), "CORRECTNESS"), new FindingRef(second.fingerprint(), "TEST"));
+        assertThat(FindingMarker.strip(markdown)).doesNotContain("codemind:finding").contains("越界", "无合法指纹");
     }
 
     @Test

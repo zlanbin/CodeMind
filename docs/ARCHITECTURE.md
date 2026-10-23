@@ -107,7 +107,7 @@ review → integration 已落地（M7a）：
 | `PullRequestReceived` | integration → review | 创建评审任务 |
 | `ReviewCompleted` | review → integration | 回写评论（M7b，topic `codemind-review-completed`） |
 | `ReviewPublished` | integration → review | 回写成功回执，review 推进 `PUBLISHED`（M7b，topic `codemind-review-published`） |
-| `FindingFeedbackReceived` | integration → memory | 反馈学习 |
+| `FindingFeedbackReceived` | integration → memory | 反馈学习（M9a，topic `codemind-finding-feedback`，见 7.2） |
 | `ReviewCompleted` | review → memory | 沉淀任务记忆 |
 
 事件定义统一放在 `codemind-common` 的 `event` 包。`ReviewCompleted` 携带已渲染好的总结正文与
@@ -312,6 +312,29 @@ M8 落地范围（计划 `docs/plans/M8.md`）：L2 写入 / 混合召回 / 归�
 4. 与已有记忆比对，执行 ADD / UPDATE / DELETE 冲突消解
 5. 下次评审在 Dedup & Filter 节点过滤同类意见
 
+M9a 落地（1~4 步，计划 `docs/plans/M9.md`；第 5 步留 M9b）：
+
+- **对回 Finding**：review 渲染行级评论时，每条合并进来的 Finding 追加隐藏标记
+  `<!-- codemind:finding fp=<sha256> cat=<CATEGORY> -->`，格式与解析在 `codemind-common` 的 `FindingMarker`，写读两侧共用。
+  M9 前发布的评论、SUMMARY_ONLY 降级发布的评论没有行级标记，收不到反馈
+- **拿反馈**：GitHub 没有 reaction webhook，integration 定时（默认 5m）轮询账本里 14 天内 `PUBLISHED` 的 review：
+  `pulls/{n}/comments` 取属于该 review 且带标记的评论，再取每条的 👎（`reactions?content=-1`）和对它的回复。
+  另有手动入口 `POST /internal/feedback/poll?repo=&prNumber=`（只读 GitHub、发 MQ）
+- **谁的反馈算数**：只收对仓库有写权限的账号（`collaborators/{login}/permission` 为 admin/maintain/write），
+  可配白名单 `codemind.feedback.trusted-logins`；查不到权限按不可信。公开仓库外人 👎 不能压掉真缺陷
+- **取舍**：同一人对同一条评论既 👎 又回复，只学回复（👎 记 `SUPERSEDED`）；合并了多条意见的评论只有 👎，
+  memory 记 `AMBIGUOUS` 不学——猜不出否决的是哪条，T6 实测猜错时连真缺陷一起学成否决
+- **可靠投递**：integration 账本 `integration.finding_feedback`（V3），`(repo, source_type, source_id)` 唯一，
+  `PENDING → SENT`，坏 payload 或失败 10 次转 `FAILED`；重投用同一 eventId。memory 用 `memory.feedback_event`（V2）
+  按 eventId 只学一次，事件登记是写记忆事务的第一步
+- **抽取**：memory 用 LLM 把反馈写成「本项目允许 / 不要求……」的否决规则（方向必须与原意见相反），
+  维度只能取自评论里出现的；回复只为它点名的维度写规则。LLM 不可用时 👎 降级为模板（outcome 带 `DEGRADED:`），
+  回复抛出等 MQ 重投
+- **冲突消解**：召回相关记忆（≤5 条、score ≥ 0.05）交给 LLM 选 ADD / UPDATE / DELETE / NOOP，硬约束：
+  NOOP / UPDATE 只能落在 REJECTED_PATTERN；DELETE 只能删 COMMON_DEFECT；违反一律退回 ADD。
+  结果里总有一条带 `[维度]` 前缀的 REJECTED_PATTERN。importance：👎 0.8，带理由的回复 0.9
+- 已知限制：撤销 👎 / 删除回复不回收已学记忆；memory 消费重试耗尽进死信后反馈丢失（integration 已标 SENT）
+
 ### 7.3 检索与遗忘
 
 - 召回：向量召回 + PG 全文检索混合
@@ -346,3 +369,5 @@ M8 的具体取法：
 | 记忆打分与排序放 domain 纯函数，SQL 只取候选（M8） | 「排序符合公式」可单测直证；换存储或索引不动公式 |
 | 记忆召回用三元组代替 PG 全文分词、精确扫描代替近似索引（M8） | 中文分词不可用；HNSW 带项目过滤会漏候选。单项目数万条后再上 `hnsw.iterative_scan` / GIN |
 | memory 先用本地特征哈希 embedding（M8） | 现有中转端点无 embedding 模型；端口隔离，换模型只动适配器与列维度 |
+| 反馈靠轮询而非 webhook，只学有写权限者的反馈（M9a） | GitHub 没有 reaction webhook；公开仓库任何人都能 👎 |
+| 冲突消解的 LLM 决定外加硬约束（M9a） | LLM 会把两条否决当矛盾互删、把 NOOP 落到缺陷上；硬约束保证结果里总有否决记忆、不误删规范 |
