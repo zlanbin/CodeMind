@@ -278,6 +278,21 @@ class ReviewExecutionServiceTest {
     }
 
     @Test
+    void fallsBackToFullDiffWhenCompareApiThrows() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareFailure = new ScmContentException("GitHub compare 瞬时失败", null);
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "应先尝试 compare API");
+        assertTrue(scm.fetchDiffCalled, "compare API 瞬时失败不该让任务直接 FAILED，应回退全量 diff");
+        assertEquals(ReviewTaskStatus.AGGREGATING, task.status(), "回退成功后任务应正常推进，不是 FAILED");
+    }
+
+    @Test
     void alreadyPublishedFingerprintIsFilteredOutAfterFindingFilter() throws Exception {
         ReviewTask task = insertedTask();
         scm.diff = javaDiff();
@@ -422,6 +437,7 @@ class ReviewExecutionServiceTest {
         private String comparedNewHead;
         private com.codemind.review.domain.scm.CompareResult compareResult =
                 new com.codemind.review.domain.scm.CompareResult("ahead", "");
+        private ScmContentException compareFailure;
 
         @Override
         public String fetchDiff(String repo, int prNumber) {
@@ -445,6 +461,9 @@ class ReviewExecutionServiceTest {
             fetchCompareDiffCalled = true;
             comparedOldHead = oldHead;
             comparedNewHead = newHead;
+            if (compareFailure != null) {
+                throw compareFailure;
+            }
             return compareResult;
         }
     }

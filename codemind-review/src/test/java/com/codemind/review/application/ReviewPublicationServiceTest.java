@@ -59,9 +59,10 @@ class ReviewPublicationServiceTest {
     }
 
     @Test void markPublishedUpsertsLastReviewedHeadOnFirstAdvance() {
+        // task 不 assignReport：真实的 markPublished 调用方拿到的是 DB rehydrate 出来的
+        // ReviewTask，report 永远是 null（M10 Final Review F1）。
         ReviewTask task = task(ReviewTaskStatus.AGGREGATING);
-        task.assignReport(reportWithOneFinding());
-        setup(task);
+        setup(task, List.of("fp-1"));
         when(tasks.markPublishedIfAggregating(task.taskId())).thenReturn(true);
 
         assertTrue(service().markPublished(ReviewPublished.of(task.taskId(), 1, false)));
@@ -69,22 +70,19 @@ class ReviewPublicationServiceTest {
         verify(lastReviewedHeads).upsert(task.repo(), task.prNumber(), task.baseSha(), task.headSha());
     }
 
-    @Test void markPublishedInsertsFingerprintRegistrationWithReportFingerprints() {
+    @Test void markPublishedInsertsFingerprintRegistrationFromOutboxEventFingerprints() {
         ReviewTask task = task(ReviewTaskStatus.AGGREGATING);
-        task.assignReport(reportWithOneFinding());
-        setup(task);
+        setup(task, List.of("fp-1", "fp-2"));
         when(tasks.markPublishedIfAggregating(task.taskId())).thenReturn(true);
 
         service().markPublished(ReviewPublished.of(task.taskId(), 1, false));
 
-        String expectedFingerprint = task.report().inline().get(0).merged().get(0).fingerprint();
-        verify(fingerprintOutbox).insert(task.taskId(), task.repo(), task.prNumber(), List.of(expectedFingerprint));
+        verify(fingerprintOutbox).insert(task.taskId(), task.repo(), task.prNumber(), List.of("fp-1", "fp-2"));
     }
 
     @Test void duplicateReceiptDoesNotDoubleInsertFingerprintRegistration() {
         ReviewTask task = task(ReviewTaskStatus.PUBLISHED);
-        task.assignReport(reportWithOneFinding());
-        setup(task);
+        setup(task, List.of("fp-1"));
 
         service().markPublished(ReviewPublished.of(task.taskId(), 1, false));
 
@@ -92,20 +90,14 @@ class ReviewPublicationServiceTest {
         verify(fingerprintOutbox, never()).insert(any(), any(), anyInt(), any());
     }
 
-    private static com.codemind.review.domain.report.ReviewReport reportWithOneFinding() {
-        var finding = com.codemind.review.domain.finding.Finding.of("A.java", 1,
-                com.codemind.review.domain.finding.Severity.BLOCKER,
-                com.codemind.review.domain.finding.Category.CORRECTNESS,
-                "可能空指针", "加判空", "int x = 1;");
-        var inline = new com.codemind.review.domain.report.InlineComment("A.java", 1,
-                com.codemind.review.domain.finding.Severity.BLOCKER, List.of(finding));
-        return new com.codemind.review.domain.report.ReviewReport(List.of(inline), List.of(), List.of(), 1);
+    void setup(ReviewTask task) {
+        setup(task, List.of());
     }
 
-    void setup(ReviewTask task) {
+    void setup(ReviewTask task, List<String> fingerprints) {
         when(tasks.findByIdForUpdate(task.taskId())).thenReturn(Optional.of(task));
-        var e=ReviewCompleted.of(task.taskId(),task.repo(),7,"head","summary",List.of());
-        when(outbox.findByTaskId(task.taskId())).thenReturn(Optional.of(new OutboxEntry(e,e.occurredAt(),e.occurredAt(),0,null)));
+        var e = ReviewCompleted.of(task.taskId(), task.repo(), 7, "head", "summary", List.of(), fingerprints);
+        when(outbox.findByTaskId(task.taskId())).thenReturn(Optional.of(new OutboxEntry(e, e.occurredAt(), e.occurredAt(), 0, null)));
     }
     static ReviewTask task(ReviewTaskStatus status) {
         return ReviewTask.rehydrate(UUID.randomUUID().toString(),"owner/repo",7,"head","base",UUID.randomUUID().toString(),status,java.time.Instant.now());

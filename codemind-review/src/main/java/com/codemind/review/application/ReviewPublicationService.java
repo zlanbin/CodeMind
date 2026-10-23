@@ -1,11 +1,8 @@
 package com.codemind.review.application;
 
 import com.codemind.common.event.ReviewPublished;
-import com.codemind.review.domain.finding.Finding;
 import com.codemind.review.domain.publication.FingerprintRegistrationOutboxRepository;
 import com.codemind.review.domain.publication.ReviewOutboxRepository;
-import com.codemind.review.domain.report.ReviewReport;
-import com.codemind.review.domain.report.SummaryItem;
 import com.codemind.review.domain.task.LastReviewedHeadRepository;
 import com.codemind.review.domain.task.ReviewTask;
 import com.codemind.review.domain.task.ReviewTaskRepository;
@@ -17,7 +14,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.stream.Stream;
 
 /** 成功状态与 outbox 确认同事务，统一先锁 task。 */
 @Service
@@ -44,7 +40,8 @@ public class ReviewPublicationService {
     public boolean markPublished(ReviewPublished event) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var task = tasks.findByIdForUpdate(event.taskId());
-            if (task.isEmpty() || outbox.findByTaskId(event.taskId()).isEmpty()) {
+            var outboxEntry = outbox.findByTaskId(event.taskId());
+            if (task.isEmpty() || outboxEntry.isEmpty()) {
                 log.warn("发布回执缺少任务或原请求 taskId={}", event.taskId());
                 return false;
             }
@@ -64,23 +61,14 @@ public class ReviewPublicationService {
             if (firstAdvance) {
                 ReviewTask t = task.get();
                 lastReviewedHeadRepository.upsert(t.repo(), t.prNumber(), t.baseSha(), t.headSha());
-                if (t.report() != null) {
-                    List<String> fingerprints = collectFingerprints(t.report());
-                    if (!fingerprints.isEmpty()) {
-                        fingerprintOutbox.insert(t.taskId(), t.repo(), t.prNumber(), fingerprints);
-                    }
+                // 指纹只能从 outbox 存的 ReviewCompleted 事件里拿：这里的 task 是从数据库
+                // rehydrate 出来的，report 字段从未持久化，永远是 null（M10 Final Review F1）。
+                List<String> fingerprints = outboxEntry.get().event().fingerprints();
+                if (!fingerprints.isEmpty()) {
+                    fingerprintOutbox.insert(t.taskId(), t.repo(), t.prNumber(), fingerprints);
                 }
             }
             return true;
         }));
-    }
-
-    private static List<String> collectFingerprints(ReviewReport report) {
-        return Stream.concat(
-                report.inline().stream().flatMap(c -> c.merged().stream()),
-                report.summary().stream().map(SummaryItem::finding))
-                .map(Finding::fingerprint)
-                .distinct()
-                .toList();
     }
 }

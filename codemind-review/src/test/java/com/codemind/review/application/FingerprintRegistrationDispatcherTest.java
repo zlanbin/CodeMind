@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -25,7 +26,7 @@ class FingerprintRegistrationDispatcherTest {
     void successfulRegistrationAcknowledges() {
         var registration = new FingerprintRegistration("task-1", "org/repo", 7, List.of("fp1"));
         var outbox = new StubOutbox(List.of(new FingerprintRegistrationDelivery(registration, "lease-1")));
-        var port = new StubPort(null);
+        var port = new StubPort(Map.of());
         var dispatcher = new FingerprintRegistrationDispatcher(outbox, port, clock, 50,
                 Duration.ofSeconds(120), Duration.ofSeconds(60));
 
@@ -41,7 +42,7 @@ class FingerprintRegistrationDispatcherTest {
     void failedRegistrationReschedulesWithoutThrowing() {
         var registration = new FingerprintRegistration("task-2", "org/repo", 7, List.of("fp1"));
         var outbox = new StubOutbox(List.of(new FingerprintRegistrationDelivery(registration, "lease-2")));
-        var port = new StubPort(new TaskFingerprintException("memory 不可达", null));
+        var port = new StubPort(Map.of(7, new TaskFingerprintException("memory 不可达", null)));
         var dispatcher = new FingerprintRegistrationDispatcher(outbox, port, clock, 50,
                 Duration.ofSeconds(120), Duration.ofSeconds(60));
 
@@ -52,10 +53,51 @@ class FingerprintRegistrationDispatcherTest {
         assertEquals(List.of("task-2"), outbox.rescheduledTaskIds);
     }
 
+    /** M10 Final Review F4：一条失败不能挡住同批其它任务，异常网要兜住任意 RuntimeException。 */
+    @Test
+    void oneFailureInBatchDoesNotBlockOthers() {
+        var failing = new FingerprintRegistration("task-fail", "org/repo", 7, List.of("fp1"));
+        var ok = new FingerprintRegistration("task-ok", "org/repo", 8, List.of("fp2"));
+        var outbox = new StubOutbox(List.of(
+                new FingerprintRegistrationDelivery(failing, "lease-fail"),
+                new FingerprintRegistrationDelivery(ok, "lease-ok")));
+        var port = new StubPort(Map.of(7, new IllegalStateException("意外运行时异常")));
+        var dispatcher = new FingerprintRegistrationDispatcher(outbox, port, clock, 50,
+                Duration.ofSeconds(120), Duration.ofSeconds(60));
+
+        int count = assertDoesNotThrow(dispatcher::dispatchDue, "批内一条非 TaskFingerprintException 失败不该挡住其它任务");
+
+        assertEquals(2, count);
+        assertEquals(List.of("task-ok"), outbox.acknowledged, "失败的那条不该被确认");
+        assertEquals(List.of("task-fail"), outbox.rescheduledTaskIds, "失败的那条应被重排");
+        assertEquals(List.of("org/repo"), port.recordedRepos, "正常那条应照常登记");
+    }
+
+    /** acknowledge 本身抛异常（如瞬时 DB 故障）也不该挡住批内其它任务。 */
+    @Test
+    void acknowledgeFailureDoesNotBlockOthers() {
+        var ackThrows = new FingerprintRegistration("task-ack-fail", "org/repo", 7, List.of("fp1"));
+        var ok = new FingerprintRegistration("task-ok", "org/repo", 8, List.of("fp2"));
+        var outbox = new StubOutbox(List.of(
+                new FingerprintRegistrationDelivery(ackThrows, "lease-1"),
+                new FingerprintRegistrationDelivery(ok, "lease-2")));
+        outbox.acknowledgeFailuresFor.add("task-ack-fail");
+        var port = new StubPort(Map.of());
+        var dispatcher = new FingerprintRegistrationDispatcher(outbox, port, clock, 50,
+                Duration.ofSeconds(120), Duration.ofSeconds(60));
+
+        int count = assertDoesNotThrow(dispatcher::dispatchDue, "acknowledge 抛异常不该挡住批内其它任务");
+
+        assertEquals(2, count);
+        assertEquals(List.of("task-ok"), outbox.acknowledged);
+        assertEquals(List.of("org/repo", "org/repo"), port.recordedRepos, "两条都该照常调用 record");
+    }
+
     private static final class StubOutbox implements FingerprintRegistrationOutboxRepository {
         private final List<FingerprintRegistrationDelivery> deliveries;
         private final List<String> acknowledged = new ArrayList<>();
         private final List<String> rescheduledTaskIds = new ArrayList<>();
+        private final java.util.Set<String> acknowledgeFailuresFor = new java.util.HashSet<>();
 
         StubOutbox(List<FingerprintRegistrationDelivery> deliveries) {
             this.deliveries = deliveries;
@@ -79,16 +121,19 @@ class FingerprintRegistrationDispatcherTest {
 
         @Override
         public void acknowledge(String taskId, Instant now) {
+            if (acknowledgeFailuresFor.contains(taskId)) {
+                throw new IllegalStateException("模拟 acknowledge 瞬时失败");
+            }
             acknowledged.add(taskId);
         }
     }
 
     private static final class StubPort implements TaskFingerprintPort {
-        private final TaskFingerprintException failure;
+        private final Map<Integer, RuntimeException> failures;
         private final List<String> recordedRepos = new ArrayList<>();
 
-        StubPort(TaskFingerprintException failure) {
-            this.failure = failure;
+        StubPort(Map<Integer, RuntimeException> failures) {
+            this.failures = failures;
         }
 
         @Override
@@ -98,6 +143,7 @@ class FingerprintRegistrationDispatcherTest {
 
         @Override
         public void record(String repo, int prNumber, List<String> fingerprints) {
+            RuntimeException failure = failures.get(prNumber);
             if (failure != null) {
                 throw failure;
             }

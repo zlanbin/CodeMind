@@ -1,6 +1,5 @@
 package com.codemind.review.application;
 
-import com.codemind.review.domain.finding.TaskFingerprintException;
 import com.codemind.review.domain.finding.TaskFingerprintPort;
 import com.codemind.review.domain.publication.FingerprintRegistrationDelivery;
 import com.codemind.review.domain.publication.FingerprintRegistrationOutboxRepository;
@@ -47,19 +46,26 @@ public class FingerprintRegistrationDispatcher {
 
     private void send(FingerprintRegistrationDelivery delivery) {
         var reg = delivery.registration();
+        boolean succeeded = false;
+        String error = null;
         try {
             taskFingerprintPort.record(reg.repo(), reg.prNumber(), reg.fingerprints());
-            outbox.acknowledge(reg.taskId(), clock.instant());
-        } catch (TaskFingerprintException e) {
-            log.warn("指纹登记失败 taskId={} error={}", reg.taskId(), e.getMessage());
-            try {
-                outbox.reschedule(reg.taskId(), delivery.leaseToken(), clock.instant().plus(retryDelay),
-                        e.getClass().getSimpleName());
-            } catch (RuntimeException rescheduleFailure) {
-                // 原领取租约仍在；到期后可重领，不能因一条请求挡住本批其它任务。
-                log.warn("指纹登记重排失败 taskId={} error={}", reg.taskId(),
-                        rescheduleFailure.getClass().getSimpleName());
+            succeeded = true;
+        } catch (RuntimeException e) {
+            // 不只兜 TaskFingerprintException：任意运行时异常都不能让 forEach 中断，否则
+            // 批内排在后面的任务会被一条坏请求挡住（M10 Final Review F4）。
+            error = e.getClass().getSimpleName();
+            log.warn("指纹登记失败 taskId={} error={}", reg.taskId(), error);
+        }
+        try {
+            if (succeeded) {
+                outbox.acknowledge(reg.taskId(), clock.instant());
+            } else {
+                outbox.reschedule(reg.taskId(), delivery.leaseToken(), clock.instant().plus(retryDelay), error);
             }
+        } catch (RuntimeException e) {
+            // 原领取租约仍在；到期后可重领，不能因一条请求挡住本批其它任务。
+            log.warn("指纹登记确认/重排失败 taskId={} error={}", reg.taskId(), e.getClass().getSimpleName());
         }
     }
 }

@@ -167,8 +167,10 @@ public class ReviewExecutionService {
             var comments = report.inline().stream().map(comment ->
                     new com.codemind.common.event.ReviewCompleted.LineComment(comment.path(), comment.line(),
                             renderer.renderInline(comment))).toList();
+            List<String> fingerprints = afterPublishedFilter.stream()
+                    .map(com.codemind.review.domain.finding.Finding::fingerprint).distinct().toList();
             completion.register(com.codemind.common.event.ReviewCompleted.of(task.taskId(), task.repo(),
-                    task.prNumber(), task.headSha(), renderer.renderSummary(report), comments));
+                    task.prNumber(), task.headSha(), renderer.renderSummary(report), comments, fingerprints));
             return result;
         } catch (Exception e) {
             markFailed(task);
@@ -184,11 +186,17 @@ public class ReviewExecutionService {
     private String resolveDiff(ReviewTask task) {
         var last = lastReviewedHeadRepository.findFor(task.repo(), task.prNumber());
         if (last.isPresent() && last.get().baseSha().equals(task.baseSha())) {
-            var compare = scmContentPort.fetchCompareDiff(task.repo(), last.get().headSha(), task.headSha());
-            if (compare.isAhead()) {
-                return compare.diffText();
+            try {
+                var compare = scmContentPort.fetchCompareDiff(task.repo(), last.get().headSha(), task.headSha());
+                if (compare.isAhead()) {
+                    return compare.diffText();
+                }
+                log.info("compare status={} 非 ahead，回退全量 diff taskId={}", compare.status(), task.taskId());
+            } catch (com.codemind.review.domain.scm.ScmContentException e) {
+                // compare 调用本身失败（网络抖动等）是不确定场景，按计划的全局约束回退全量
+                // diff，不能让一次瞬时失败直接判任务 FAILED（M10 Final Review F3）。
+                log.warn("compare API 调用失败，回退全量 diff taskId={} error={}", task.taskId(), e.getMessage());
             }
-            log.info("compare status={} 非 ahead，回退全量 diff taskId={}", compare.status(), task.taskId());
         }
         return scmContentPort.fetchDiff(task.repo(), task.prNumber());
     }
