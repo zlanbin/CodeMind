@@ -1,5 +1,6 @@
 package com.codemind.review.infrastructure.scm;
 
+import com.codemind.review.domain.scm.CompareResult;
 import com.codemind.review.domain.scm.ScmContentException;
 import com.codemind.review.domain.scm.ScmContentPort;
 import org.slf4j.Logger;
@@ -53,6 +54,17 @@ public class FeignScmContentAdapter implements ScmContentPort {
         } catch (RuntimeException e) {
             throw new ScmContentException(
                     "取文件源码失败 repo=%s ref=%s 共 %d 个文件".formatted(repo, ref, paths.size()), e);
+        }
+    }
+
+    @Override
+    public CompareResult fetchCompareDiff(String repo, String oldHead, String newHead) {
+        try {
+            CompareDiffResponseDto response = feignClient.compareDiff(repo, oldHead, newHead);
+            return new CompareResult(response.status(), response.diffText());
+        } catch (RuntimeException e) {
+            throw new ScmContentException(
+                    "取增量 diff 失败 repo=%s oldHead=%s newHead=%s".formatted(repo, oldHead, newHead), e);
         }
     }
 }

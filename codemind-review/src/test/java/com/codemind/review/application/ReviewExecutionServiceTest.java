@@ -307,6 +307,12 @@ class ReviewExecutionServiceTest {
             requestedPaths = List.copyOf(paths);
             return sources;
         }
+
+        @Override
+        public com.codemind.review.domain.scm.CompareResult fetchCompareDiff(
+                String repo, String oldHead, String newHead) {
+            throw new UnsupportedOperationException("本测试类未覆盖 compareDiff，见 Task 3 的新用例");
+        }
     }
 
     private static final class StubTaskRepository implements ReviewTaskRepository {

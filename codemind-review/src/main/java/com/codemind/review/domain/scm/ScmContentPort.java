@@ -28,4 +28,13 @@ public interface ScmContentPort {
      * @throws ScmContentException 整批调用失败（单个文件失败由上游跳过，不抛）
      */
     Map<String, String> fetchNewSources(String repo, String ref, List<String> paths);
+
+    /**
+     * 对比两次 commit，取两者之间的 diff（M10 增量评审）。
+     *
+     * <p>{@code status} 非 {@code ahead} 时调用方应回退到 {@link #fetchDiff} 取整份 diff。
+     *
+     * @throws ScmContentException 取不到（上游失败、网络不通）
+     */
+    CompareResult fetchCompareDiff(String repo, String oldHead, String newHead);
 }
