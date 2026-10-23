@@ -44,8 +44,16 @@ codemind:
       pull-request-received: codemind-pull-request-received
       review-completed: codemind-review-completed
       review-published: codemind-review-published
+      finding-feedback: codemind-finding-feedback
     consumer-group:
       review-completed: codemind-integration-review-completed
+  feedback:
+    # M9：轮询已发布 review 的 👎 / 回复。只读 GitHub；测试里关掉
+    poll-enabled: ${CODEMIND_FEEDBACK_POLL_ENABLED:true}
+    poll-interval: ${CODEMIND_FEEDBACK_POLL_INTERVAL:5m}
+    poll-initial-delay: 1m
+    # 只看最近这段时间发布（或更新）过的 review
+    lookback: ${CODEMIND_FEEDBACK_LOOKBACK:14d}
   scm:
     # 访问令牌只从环境变量注入，不写入仓库。空串为匿名（只能读公开仓库，限流很低）
     github-token: ${GITHUB_TOKEN:}

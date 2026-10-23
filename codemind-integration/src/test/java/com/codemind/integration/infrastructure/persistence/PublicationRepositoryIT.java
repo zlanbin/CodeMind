@@ -138,10 +138,10 @@ class PublicationRepositoryIT {
         assertThat(jdbc.sql("select to_regclass('integration.review_publication')::text")
                 .query(String.class).single()).isEqualTo("integration.review_publication");
         assertThat(jdbc.sql("select version from integration.flyway_schema_history where version is not null order by installed_rank")
-                .query(String.class).list()).containsExactly("1", "2");
+                .query(String.class).list()).containsExactly("1", "2", "3");
         assertThat(jdbc.sql("select script from integration.flyway_schema_history where version is not null order by installed_rank")
                 .query(String.class).list()).containsExactly("V1__create_review_publication.sql",
-                        "V2__require_nonnegative_inline_count.sql");
+                        "V2__require_nonnegative_inline_count.sql", "V3__create_finding_feedback.sql");
         assertThat(jdbc.sql("select version from public.flyway_schema_history where success order by installed_rank")
                 .query(String.class).list()).startsWith("1", "2", "3", "4");
         assertThat(jdbc.sql("select count(*) from public.flyway_schema_history where script = 'V1__create_review_publication.sql'")

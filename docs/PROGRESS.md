@@ -5,18 +5,31 @@
 
 ## 当前状态
 
-- 当前里程碑：**M8 已完成**（memory-service：L2 记忆写入 / 混合召回 / 打分 / 归档，L1 已发布指纹）
+- 当前里程碑：**M9a 已完成**（反馈进来：行级标记 → 轮询 👎 / 回复 → `FindingFeedbackReceived` → LLM 抽取 + 冲突消解）。
+  M9 拆成 M9a / M9b，M9b（Dedup & Filter 过滤生效 + ROADMAP 原验证点）未开始
 - 上次更新：2026-10-23
-- 分支：`feat/m8-memory`（基于 master `e94223e`），改动**全在工作区、未提交**，待用户说「代码提交」
+- 分支：M8 已提交推送 `feat/m8-memory`（`3a26ee0`，**PR 未开**，需用户在网页开）；M9a 在 `feat/m9-feedback`（基于 `3a26ee0`），
+  改动**全在工作区、未提交**，待用户说「代码提交」
 - 阻塞项：无
-- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过，见 M8 节）
+- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过；T6 真实验收通过，见 M9a 节）
 
 ## 下一个会话要做的事
 
-**先收尾 M8 的提交**（若本会话未做）：`feat/m8-memory` 提交、推送、开 PR 到 master。然后进 **M9：反馈闭环与冲突消解**。
+**先收尾提交**（若本会话未做）：M8 开 PR 合并；M9a 提交推送，等 M8 合并后再开 PR（否则 PR 会带上 M8 的改动）。
+然后进 **M9b：Dedup & Filter**，计划在 `docs/plans/M9.md` 的 M9b 节（还只是一段话，进 S1 时细化）。
 
-验证点（ROADMAP M9）：对某条意见 👎 后再提同类代码，该意见不再出现。ARCHITECTURE 7.2 是设计输入。
-M9 会往真实 PR 读反馈（只读）并可能回写，按 WORKFLOW「往外部系统写东西」在首次真实调用前停下确认。
+M9b 验证点（ROADMAP M9）：对某条意见 👎 后再提同类代码，该意见不再出现。要点：
+- review 新建 `MemoryRecallPort` + Feign 调 memory 的 `POST /internal/memories/recall`（`kind=REJECTED_PATTERN`），
+  插在 `ReviewExecutionService` 的 `reportBuilder.build` 之前（约 :140），用 LLM 判定 Finding 是否属于被否决的同类（D3 = A）
+- 召回的 `minScore` 默认 0 会带回无关记忆，M9b 要定阈值；memory 不可用时放行并记降级
+- 真实验收素材已在库里：sandbox 的两条否决记忆 `[SECURITY] 不要求对内部来源的 sku 做 null/empty 校验`、
+  `[PERFORMANCE] 允许单线程场景用普通 HashMap`。M9b 需要 `lan-bin` 再开一个含同类代码的 PR，看这两类意见不再出现，
+  而 CORRECTNESS（NPE）照常出现
+
+M9a 可直接复用：
+- 反馈轮询：`POST /internal/feedback/poll?repo=&prNumber=`（integration）；定时器 `CODEMIND_FEEDBACK_POLL_ENABLED`
+- 记忆里的否决规则形如 `[维度] 本项目允许 / 不要求……`，维度前缀是 M9b 判同类的线索
+- sandbox PR #2 上有 review `5626224555`（行级评论 `4357950659`，带标记与测试标记）及 `lan-bin` 的 👎 与回复
 
 M8 可直接复用：
 - 写入 / 强化：`POST /internal/memories {project, kind, content, importance?}`，`kind=REJECTED_PATTERN` 就是 M9 的否决记忆；
@@ -83,6 +96,62 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M9a 反馈进来（标记 → 轮询 👎 / 回复 → LLM 抽取 + 冲突消解）—— 完成于 2026-10-23
+
+M9 按 ROADMAP「里程碑过大时」拆成 M9a / M9b（计划 `docs/plans/M9.md`，D1~D5 用户在判定门拍板，D15~D17 在 T6 实测后拍板）。
+
+改动范围：
+
+- common：`event/FindingMarker`（行级评论隐藏标记的格式与解析）、`event/FindingFeedbackReceived`
+- review：`ReviewMarkdownRenderer.renderInline` 每条 Finding 追加标记
+- integration：端口 `ScmFeedbackReader`；`GithubScmClient` 加 `listReviewComments` / `listThumbsDown`（共用 `listAllPages`，Link 分页 fail-closed）/ `canWrite`；
+  `V3__create_finding_feedback.sql`（PENDING / SENT / FAILED / SUPERSEDED）、domain `feedback`、`JdbcFindingFeedbackRepository`；
+  `FeedbackCollectionService`（轮询、作者鉴权、回复取代 👎、投递）；`FeedbackConfig` 定时器、`ClockConfig`；
+  `FeedbackController` `POST /internal/feedback/poll` + `FeedbackExceptionHandler`；MQ topic `codemind-finding-feedback`
+- memory：加 rocketmq + spring-ai 依赖；domain `feedback`（`FeedbackExtractor`、`ConflictResolver`、`Lessons`、`ConflictDecision`、
+  `FeedbackInput`、`LlmJson`、端口 `LlmClient` / `FeedbackEventRepository`）；`V2__create_feedback_event.sql`；
+  application `FeedbackLearningService`；`infrastructure/llm/SpringAiLlmClient`、`JdbcFeedbackEventRepository`；`interfaces/mq/FindingFeedbackListener`
+
+验证命令与结果（2026-10-23，真实中间件 + 真实 `CODEMIND_LLM_API_KEY` / `GITHUB_TOKEN`）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **真实 PR 上 👎 后 memory 出现对应 REJECTED_PATTERN**（M9a） | T6：`-Pgithub-write` prepare → publish 发 review `5626224555` 到 sandbox PR #2；`lan-bin` 对行级评论 `4357950659` 👎 并回复「SECURITY 和 PERFORMANCE 不适用…」；本机 integration 8081 + memory 8083 生产 topic，`POST /internal/feedback/poll` | **通过**（第二轮）。账本：回复 `SENT`、👎 `SUPERSEDED`；memory outcome `ADD#289;ADD#290`（无 `DEGRADED:`）；记忆 `[SECURITY] 本项目不要求对内部来源的 sku 参数进行 null/empty 校验`、`[PERFORMANCE] 本项目允许在单线程访问场景下使用普通 HashMap…`，importance 0.9；回复没点名的 CORRECTNESS / TEST 未学 |
+| GitHub 侧契约 | T6 只读回查 | **通过**。评论正文 4 个标记原样保留；`pull_request_review_id` = 账本 `review_id`；`content=-1` 过滤可用；`lan-bin` 权限 `write` |
+| 重复轮询不重复学习 | T6 再次 poll | **通过**。`registered=0`，记忆 2 条、事件 1 条、账本 2 条均不变 |
+| 抽取方向与维度（真实 LLM） | `FeedbackExtractorIT`（4 例，54s 实跑） | **通过**。单条 👎 写成「本项目允许…不要求…」；合并评论的回复只学点名维度；「谢谢已改」不否决 |
+| 冲突消解硬约束 | `ConflictResolverTest`（8 例） | **通过**。NOOP/UPDATE 只落 REJECTED_PATTERN；DELETE 只删 COMMON_DEFECT；否决不互删；UPDATE 保留维度前缀 |
+| 学习事务、幂等、降级、AMBIGUOUS | `FeedbackLearningIT`（8 例，真实 PG + MQ + 脚本 LLM） | **通过** |
+| 收集、鉴权、取代、投递 | `FeedbackCollectionServiceTest`（8 例）、`FindingFeedbackRepositoryIT`（6 例）、`FeedbackPollIT`（2 例，真实 MQ） | **通过** |
+| 全仓回归 | `mvn verify`（不带过滤） | **通过**。8 模块 BUILD SUCCESS，**496 测试 0 失败 0 错误 0 跳过**（common 11；gateway 1；integration 140 + 36 IT；review 175 + 51 IT；memory 50 + 29 IT；rule / admin 各 1）。真实 LLM/GitHub IT 均实跑 |
+
+T6 第一轮验收**发现严重缺陷**（链路通、内容错），已修复后重跑通过：
+- 👎 与回复都学：👎 的抽取把 4 条原意见复述成「本项目要求校验 / 必须线程安全」——方向与否决相反（含真缺陷 NPE）；
+  冲突消解再以「矛盾」为由 DELETE 掉回复学到的正确规则。照这些记忆过滤会把真缺陷压掉
+- 修法（用户确认）：D15 同一人既回复又 👎 只学回复；D16 合并评论只有 👎 记 AMBIGUOUS 不学；D17 抽取 prompt 规定方向并给正反例，
+  👎 直接告诉模型已确定否决（否则无回复时模型答 rejected=false，走模板）；DELETE 只能删 COMMON_DEFECT
+- 第一轮错误记忆（id 207~210）与事件登记已按用户同意删除；V3 迁移因改动本地重置后重新应用
+
+S6 评审（固定点 `3a26ee0`，标准轴 / 规格轴两个独立子代理）：标准轴 0 硬违规；规格轴 1 严重（NOOP 落在 COMMON_DEFECT）。
+连同 10 余条判断题回 S5 修复，明细见 `docs/plans/M9.md` S6 节。T6 后的修复未再过独立评审，由新增单测 / IT / 真实验收覆盖。
+
+本里程碑踩到的环境问题（非代码缺陷）：
+- 中转端点偶发 HTTP 524，Spring AI 自动重试，单次调用最长约 150s
+- 全仓 verify 期间机器睡眠，`PullRequestReceivedListenerIT` 显示耗时 12082s 后超时报错；单独重跑 11s 全绿，全仓重跑通过
+- 单独 `mvn -pl <模块>` 不带 `-am` 时会用本地仓库里旧的 common jar，编译报找不到新类；先 `mvn install -pl codemind-common`
+- `codemind-review-completed-test` 上有一条残留消息反复重投，触发 integration IT 上下文里真实 GitHub 读（M7b 记过的「普通 IT 未替换 GitHub 端口」）
+
+遗留问题 / 技术债：
+- 撤销 👎 / 删除回复不回收已学记忆；先 👎 后（下一轮轮询）才回复时，👎 已被学过，回复不会取代它
+- memory 消费重试耗尽进死信后反馈丢失（integration 已标 SENT，不再重投）；模板降级（`DEGRADED:`）无自动补学
+- 每轮轮询 N+1 调 GitHub（每条评论查一次 reactions、每个新作者查一次权限）；匿名 token 时仍默认开启、403/429 无退避；
+  评论超过 1000 条的 PR 每轮 fail-closed 收不到反馈
+- NOOP 时目标若被并发删除会被写回；`collect(repo, pr)` 在 Java 里过滤而非下推 SQL；手动 poll 会投递全部 PENDING
+- 定时器在 `infrastructure.config`，与 memory 的 `interfaces/mq` 驱动方位置不统一
+- M9b 尚未开始：review 侧不读否决记忆，**目前学到的记忆还不影响评审结果**
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**。3.3 事件表注明 M9a topic；7.2 补对回 Finding、拿反馈、鉴权、取舍、可靠投递、抽取、冲突消解约束与已知限制；8 加两条决策。
 
 ### M8 memory-service（L1/L2 记忆、混合检索）—— 完成于 2026-10-23
 
@@ -758,6 +827,10 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-23 | M8 | 向量一路不建 HNSW，按 project 过滤后精确扫描 | 全表 HNSW 带过滤先取全局 ef_search=40 近邻再过滤，小项目拿不满候选（S6 双轴） |
 | 2026-10-23 | M8 | 召回不刷新 `reinforced_at`，衰减只从写入（强化）算起 | 读不改状态，排序可复现；M9 反馈强化走写入路径 |
 | 2026-10-23 | M8 | L1 只做已发布指纹（PG），ChangeMap/ChunkSummary 复用与 Redis 留 M10 | 没有 M10 的调用方就无从验证；指纹要比 Redis 更持久 |
+| 2026-10-23 | M9 | 拆成 M9a（反馈进来）/ M9b（过滤生效） | 跨三个服务，一个会话做不完；M9a 有独立验证点 |
+| 2026-10-23 | M9a | 反馈靠轮询 + 手动端点，不用 webhook | GitHub 无 reaction webhook，本机 8081 外网不可达（判定门确认） |
+| 2026-10-23 | M9a | 只学有写权限者的反馈，可配白名单 | 公开仓库外人 👎 可压掉真缺陷（S6 标准轴） |
+| 2026-10-23 | M9a | 同一人既回复又 👎 只学回复；合并评论只有 👎 不学；DELETE 只删 COMMON_DEFECT | T6 第一轮实测学反了且删掉了正确规则（用户确认修法） |
 
 ## 环境与常用命令
 

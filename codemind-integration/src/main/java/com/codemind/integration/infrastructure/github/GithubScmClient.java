@@ -4,8 +4,8 @@ import com.codemind.integration.application.port.ExistingReview;
 import com.codemind.integration.application.port.ReviewDraft;
 import com.codemind.integration.application.port.ScmReviewPublisher;
 import com.codemind.integration.application.port.ScmClient;
-import java.util.List;
 import com.codemind.integration.application.port.ScmException;
+import com.codemind.integration.application.port.ScmFeedbackReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -41,7 +41,7 @@ import java.util.stream.Collectors;
  * <p>超时不在此类配置：{@code RestClient.Builder} 的 requestFactory 由装配层设置，
  * 这里再设会顶掉测试装的 mock（见 M7a ledger 的 Ruling）。
  */
-public class GithubScmClient implements ScmClient, ScmReviewPublisher {
+public class GithubScmClient implements ScmClient, ScmReviewPublisher, ScmFeedbackReader {
 
     @Override
     public List<ExistingReview> listReviews(String repo, int pr) {
@@ -99,6 +99,157 @@ public class GithubScmClient implements ScmClient, ScmReviewPublisher {
             }
             throw malformedResponse("GitHub review 创建响应无法解析", repo, pr, e);
         }
+    }
+
+    @Override
+    public List<ReviewCommentView> listReviewComments(String repo, int pr) {
+        return listAllPages("/repos/%s/pulls/%d/comments".formatted(encodePath(repo), pr), "",
+                "%s PR #%d 的行级评论".formatted(repo, pr), node -> {
+                    requirePositiveId(node);
+                    return new ReviewCommentView(node.get("id").asLong(), optionalLong(node, "pull_request_review_id"),
+                            optionalLong(node, "in_reply_to_id"), login(node), optionalText(node, "body"));
+                });
+    }
+
+    @Override
+    public List<ReactionView> listThumbsDown(String repo, long commentId) {
+        return listAllPages("/repos/%s/pulls/comments/%d/reactions".formatted(encodePath(repo), commentId),
+                "&content=-1", "%s 评论 %d 的 reactions".formatted(repo, commentId), node -> {
+                    requirePositiveId(node);
+                    if (!"-1".equals(optionalText(node, "content"))) {
+                        throw new IllegalArgumentException("unexpected reaction content");
+                    }
+                    return new ReactionView(node.get("id").asLong(), login(node));
+                });
+    }
+
+    /** {@code GET /repos/{repo}/collaborators/{login}/permission}：admin / maintain / write 算可写；404 不是协作者。 */
+    @Override
+    public boolean canWrite(String repo, String login) {
+        if (login == null || login.isBlank()) {
+            return false;
+        }
+        URI uri = URI.create("%s/repos/%s/collaborators/%s/permission".formatted(baseUrl, encodePath(repo),
+                UriUtils.encodePathSegment(login, StandardCharsets.UTF_8)));
+        String target = "%s 的协作者 %s".formatted(repo, login);
+        try {
+            ResponseEntity<String> response = restClient.get()
+                    .uri(uri)
+                    .header("Accept", JSON_MEDIA_TYPE)
+                    .retrieve()
+                    .onStatus(status -> status.value() == 404, (request, clientResponse) -> { })
+                    .onStatus(HttpStatusCode::isError, (request, clientResponse) -> {
+                        throw new ScmException(describe(clientResponse.getStatusCode().value(), target),
+                                clientResponse.getStatusCode().value());
+                    })
+                    .toEntity(String.class);
+            if (response.getStatusCode().value() == 404) {
+                return false;
+            }
+            JsonNode node = objectMapper.readTree(response.getBody() == null ? "" : response.getBody());
+            String role = node == null ? "" : optionalText(node, "role_name");
+            String permission = node == null ? "" : optionalText(node, "permission");
+            return java.util.Set.of("admin", "maintain", "write").contains(role.isBlank() ? permission : role);
+        } catch (ResourceAccessException e) {
+            throw networkFailure(target, e);
+        } catch (JsonProcessingException | IllegalArgumentException e) {
+            throw new ScmException("GitHub 协作者权限响应畸形: " + target, 0,
+                    new RuntimeException("GitHub response format failure"));
+        } catch (RestClientException e) {
+            throw new ScmException("GitHub 协作者权限响应无法解析: " + target, 0,
+                    new RuntimeException("GitHub response format failure"));
+        }
+    }
+
+    /**
+     * 按 {@code Link: rel="next"} 翻页（只取 next 是否存在，页码自己拼，不跟随响应里的 URL），
+     * 超过 {@link #MAX_PAGES} 页拒绝返回不完整列表。与 {@link #listReviews} 同一套失败语义。
+     */
+    private <T> List<T> listAllPages(String path, String extraQuery, String target,
+                                     java.util.function.Function<JsonNode, T> parser) {
+        List<T> items = new ArrayList<>();
+        for (int page = 1; page <= MAX_PAGES; page++) {
+            URI uri = URI.create("%s%s?per_page=%d&page=%d%s".formatted(baseUrl, path, PAGE_SIZE, page, extraQuery));
+            try {
+                ResponseEntity<String> response = restClient.get()
+                        .uri(uri)
+                        .header("Accept", JSON_MEDIA_TYPE)
+                        .retrieve()
+                        .onStatus(HttpStatusCode::isError, (request, clientResponse) -> {
+                            throw new ScmException(describe(clientResponse.getStatusCode().value(), target),
+                                    clientResponse.getStatusCode().value());
+                        })
+                        .toEntity(String.class);
+                boolean next;
+                try {
+                    String body = response.getBody();
+                    if (body == null || body.isBlank()) {
+                        throw new IllegalArgumentException("empty response");
+                    }
+                    JsonNode root = objectMapper.readTree(body);
+                    if (root == null || !root.isArray()) {
+                        throw new IllegalArgumentException("response is not an array");
+                    }
+                    if (root.isEmpty()) {
+                        return items;
+                    }
+                    for (JsonNode node : root) {
+                        if (!node.isObject()) {
+                            throw new IllegalArgumentException("invalid item");
+                        }
+                        items.add(parser.apply(node));
+                    }
+                    next = hasNext(response.getHeaders().get("Link"));
+                } catch (JsonProcessingException | IllegalArgumentException e) {
+                    throw new ScmException("GitHub 列表响应畸形: " + target, 0,
+                            new RuntimeException("GitHub response format failure"));
+                }
+                if (!next) {
+                    return items;
+                }
+            } catch (ResourceAccessException e) {
+                throw networkFailure(target, e);
+            } catch (RestClientException e) {
+                throw new ScmException("GitHub 列表响应无法解析: " + target, 0,
+                        new RuntimeException("GitHub response format failure"));
+            }
+        }
+        throw new ScmException("GitHub 分页超过安全上限，拒绝返回不完整列表: " + target, 0);
+    }
+
+    private static void requirePositiveId(JsonNode node) {
+        JsonNode id = node.get("id");
+        if (id == null || !id.isIntegralNumber() || !id.canConvertToLong() || id.asLong() <= 0) {
+            throw new IllegalArgumentException("missing or invalid id");
+        }
+    }
+
+    private static Long optionalLong(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw new IllegalArgumentException("invalid " + field);
+        }
+        return value.asLong();
+    }
+
+    private static String optionalText(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        if (value == null || value.isNull()) {
+            return "";
+        }
+        if (!value.isTextual()) {
+            throw new IllegalArgumentException("invalid " + field);
+        }
+        return value.textValue();
+    }
+
+    /** 账号被删除时 GitHub 给 {@code user: null}，记成空串而不是让整页失败。 */
+    private static String login(JsonNode node) {
+        JsonNode user = node.get("user");
+        return user == null || user.isNull() ? "" : optionalText(user, "login");
     }
 
     private ReviewPage getReviewPage(String repo, int pr, int page) {

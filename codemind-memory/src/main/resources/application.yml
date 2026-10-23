@@ -21,8 +21,28 @@ spring:
     schemas: memory
     locations: classpath:db/memory-migration
     baseline-on-migrate: false
+  ai:
+    openai:
+      # 与 review 同一中转端点；key 只经环境变量注入。占位默认值仅让无 key 环境能加载上下文
+      # （Spring AI 对空 key 启动期报错），真实 LLM 用例按 CODEMIND_LLM_API_KEY 是否存在决定跑不跑
+      base-url: ${CODEMIND_LLM_BASE_URL:https://api.aiblitz.io}
+      api-key: ${CODEMIND_LLM_API_KEY:placeholder-no-key}
+      chat:
+        options:
+          model: ${CODEMIND_LLM_MODEL:claude-haiku-4-5-20251001}
+          temperature: 0.0
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
 
 codemind:
+  mq:
+    topic:
+      finding-feedback: codemind-finding-feedback
+    consumer-group:
+      finding-feedback: codemind-memory-finding-feedback
+  llm:
+    max-retries: ${CODEMIND_LLM_MAX_RETRIES:2}
   memory:
     # decay(Δt) = 0.5^(Δt / half-life)，Δt 从最近一次写入（强化）算起
     half-life: ${CODEMIND_MEMORY_HALF_LIFE:30d}

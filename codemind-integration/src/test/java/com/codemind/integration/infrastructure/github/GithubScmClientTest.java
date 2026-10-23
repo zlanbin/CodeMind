@@ -4,6 +4,7 @@ import com.codemind.integration.application.port.DraftComment;
 import com.codemind.integration.application.port.ExistingReview;
 import com.codemind.integration.application.port.ReviewDraft;
 import com.codemind.integration.application.port.ScmException;
+import com.codemind.integration.application.port.ScmFeedbackReader;
 import com.codemind.integration.application.port.ScmReviewPublisher;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
@@ -501,6 +502,88 @@ class GithubScmClientTest {
             logger.detachAppender(logs);
             logs.stop();
         }
+    }
+
+    @Test
+    void listsReviewCommentsAcrossPagesKeepingReplyLinks() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/7/comments?per_page=100&page=1"))
+                .andExpect(header("Accept", "application/vnd.github+json"))
+                .andExpect(header("Authorization", "Bearer " + TOKEN))
+                .andRespond(withSuccess("""
+                        [{"id":101,"pull_request_review_id":55,"in_reply_to_id":null,
+                          "user":{"login":"codemind-bot"},"body":"意见"}]""", MediaType.APPLICATION_JSON)
+                        .header("Link", "<https://untrusted.test/x?page=2>; rel=\"next\""));
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/7/comments?per_page=100&page=2"))
+                .andRespond(withSuccess("""
+                        [{"id":102,"pull_request_review_id":56,"in_reply_to_id":101,
+                          "user":{"login":"lan-bin"},"body":"不适用，因为…"},
+                         {"id":103,"user":null,"body":null}]""", MediaType.APPLICATION_JSON));
+
+        assertEquals(List.of(
+                new ScmFeedbackReader.ReviewCommentView(101, 55L, null, "codemind-bot", "意见"),
+                new ScmFeedbackReader.ReviewCommentView(102, 56L, 101L, "lan-bin", "不适用，因为…"),
+                new ScmFeedbackReader.ReviewCommentView(103, null, null, "", "")),
+                client.listReviewComments("owner/repo", 7));
+        server.verify();
+    }
+
+    @Test
+    void collaboratorPermissionDecidesTrust() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/collaborators/lan-bin/permission"))
+                .andExpect(header("Authorization", "Bearer " + TOKEN))
+                .andRespond(withSuccess("{\"permission\":\"write\",\"role_name\":\"maintain\"}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/collaborators/reader/permission"))
+                .andRespond(withSuccess("{\"permission\":\"read\",\"role_name\":\"triage\"}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/collaborators/stranger/permission"))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/collaborators/x/permission"))
+                .andRespond(withStatus(HttpStatus.FORBIDDEN));
+
+        assertTrue(client.canWrite("owner/repo", "lan-bin"));
+        assertFalse(client.canWrite("owner/repo", "reader"));
+        assertFalse(client.canWrite("owner/repo", "stranger"));
+        assertEquals(403, assertThrows(ScmException.class, () -> client.canWrite("owner/repo", "x")).statusCode());
+        assertFalse(client.canWrite("owner/repo", ""));
+        server.verify();
+    }
+
+    @Test
+    void listsOnlyThumbsDownReactions() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/comments/101/reactions?per_page=100&page=1&content=-1"))
+                .andExpect(header("Accept", "application/vnd.github+json"))
+                .andRespond(withSuccess("[{\"id\":9,\"content\":\"-1\",\"user\":{\"login\":\"lan-bin\"}}]",
+                        MediaType.APPLICATION_JSON));
+
+        assertEquals(List.of(new ScmFeedbackReader.ReactionView(9, "lan-bin")),
+                client.listThumbsDown("owner/repo", 101));
+        server.verify();
+    }
+
+    @Test
+    void feedbackListingFailsClosedOnMalformedItemOrTooManyPages() {
+        GithubScmClient client = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/comments/101/reactions?per_page=100&page=1&content=-1"))
+                .andRespond(withSuccess("[{\"id\":9,\"content\":\"+1\"}]", MediaType.APPLICATION_JSON));
+        assertEquals(0, assertThrows(ScmException.class, () -> client.listThumbsDown("owner/repo", 101)).statusCode());
+        server.verify();
+
+        GithubScmClient paged = clientWithToken(TOKEN);
+        for (int page = 1; page <= 10; page++) {
+            server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/7/comments?per_page=100&page=" + page))
+                    .andRespond(withSuccess("[{\"id\":" + page + ",\"body\":\"x\"}]", MediaType.APPLICATION_JSON)
+                            .header("Link", "<https://untrusted.test/x>; rel=\"next\""));
+        }
+        assertThrows(ScmException.class, () -> paged.listReviewComments("owner/repo", 7));
+        server.verify();
+
+        GithubScmClient denied = clientWithToken(TOKEN);
+        server.expect(requestTo(BASE_URL + "/repos/owner/repo/pulls/7/comments?per_page=100&page=1"))
+                .andRespond(withStatus(HttpStatus.FORBIDDEN));
+        assertEquals(403, assertThrows(ScmException.class, () -> denied.listReviewComments("owner/repo", 7))
+                .statusCode());
     }
 
     @Test
