@@ -5,18 +5,18 @@
 
 ## 当前状态
 
-- 当前里程碑：**M9a 已完成**（反馈进来：行级标记 → 轮询 👎 / 回复 → `FindingFeedbackReceived` → LLM 抽取 + 冲突消解）。
-  M9 拆成 M9a / M9b，M9b（Dedup & Filter 过滤生效 + ROADMAP 原验证点）未开始
+- 当前里程碑：**M9b 已完成**（Dedup & Filter 过滤生效，ROADMAP M9 验证点达成）。M9（M9a+M9b）整体完成
 - 上次更新：2026-10-23
-- 分支：M8 已提交推送 `feat/m8-memory`（`3a26ee0`，**PR 未开**，需用户在网页开）；M9a 在 `feat/m9-feedback`（基于 `3a26ee0`），
-  改动**全在工作区、未提交**，待用户说「代码提交」
+- 分支：M8 已提交推送 `feat/m8-memory`（`3a26ee0`，**PR 未开**，需用户在网页开）；M9a + M9b 都在 `feat/m9-feedback`
+  （基于 `3a26ee0`），已提交到本地分支（`23df653` M9a、`45a5e7f`~`b634999` M9b 共 6 个 commit），**未推送**，
+  待用户说「代码提交」。`docs/plans/M9.md` 的 M9b 计划文本本身仍只在工作区未提交
 - 阻塞项：无
-- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过；T6 真实验收通过，见 M9a 节）
+- 未验证项：无（M9b 全量 `mvn verify` 带真实 key 0 跳过；真实 PR 端到端验收通过，见下）
 
 ## 下一个会话要做的事
 
-**先收尾提交**（若本会话未做）：M8 开 PR 合并；M9a 提交推送，等 M8 合并后再开 PR（否则 PR 会带上 M8 的改动）。
-然后进 **M9b：Dedup & Filter**，计划在 `docs/plans/M9.md` 的 M9b 节（还只是一段话，进 S1 时细化）。
+**先收尾提交**：M8 开 PR 合并；M9（M9a+M9b 共 7 个本地 commit）推送，等 M8 合并后再开 PR（否则 PR 会带上 M8 的改动）。
+M9 整体完成，下一个里程碑是 **M10 增量评审**（见 `docs/ROADMAP.md`）。
 
 M9b 验证点（ROADMAP M9）：对某条意见 👎 后再提同类代码，该意见不再出现。要点：
 - review 新建 `MemoryRecallPort` + Feign 调 memory 的 `POST /internal/memories/recall`（`kind=REJECTED_PATTERN`），
@@ -96,6 +96,63 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M9b Dedup & Filter 过滤生效 —— 完成于 2026-10-23
+
+计划 `docs/plans/M9.md` 文末「M9b 实施计划（S2）」一节，Task 1~5 按 `executing-plans` 顺序执行，Task 6（真实验收）
+单独向用户确认后执行。执行账本 `.superpowers/sdd/M9/progress.md`（已按完成清理）。
+
+改动范围（只动 `codemind-review`）：
+
+- domain：`domain/memory/{MemoryRecallPort, RecalledMemory, MemoryRecallException}`（召回端口）；
+  `domain/finding/{FindingFilter, FilterOutcome}`（Dedup & Filter 核心：对每条 Finding 召回同项目否决记忆候选
+  + LLM 判定同类，D3 方案 A；召回失败/无候选/LLM 判定失败一律放行，不压制真缺陷）
+- infrastructure：`infrastructure/memory/{MemoryFeignClient, RecallRequestDto, RecallResponseDto, FeignMemoryRecallAdapter}`
+  （Feign 适配器，调 memory 的 `POST /internal/memories/recall`，`kind=REJECTED_PATTERN`，`project=task.repo()`）；
+  `infrastructure/config/FindingFilterConfig`（Bean 装配，复用既有 `codemind.llm.max-retries`）
+- 接线：`ReviewExecutionService` 构造器新增 `FindingFilter` 参数，在 `reportBuilder.build(...)` 之前插入过滤，
+  过滤降级说明并入 `allDegradations()`
+- minScore 沿用 M9a 冲突消解的 `0.05`，topK=5（硬编码常量，风格与 `FeedbackLearningService.CONFLICT_MIN_SCORE` 一致）
+
+S6 评审（独立 general-purpose 子代理，因本环境无专用 code-reviewer agent 类型；固定点 `23df653` 即 M9a 完成点）
+发现 1 项 Critical + 3 项 Important + 2 项 Minor，已全部回 S5 修复并重跑验证：
+
+- **Critical**：`MemoryFeignClient.recall` 返回类型漏了 memory 侧统一的 `Result` 信封（真实响应是
+  `{code,message,data:{memories:[...]}}`，不是裸 `{memories:[...]}}`），导致 Feign 解码后 `memories` 恒为
+  `null`，过滤器在生产环境形同空操作，ROADMAP M9 验证点无法通过。根源是计划草稿对契约的描述有误（照抄了
+  `IntegrationScmFeignClient` 的裸返回写法，但 integration 的 internal 端点本身不套信封，两者不同）。
+  修复：改为 `Result<RecallResponseDto>` 并在适配器里取 `.data()`；另加真实 HTTP 端到端 IT
+  `MemoryFeignClientIT`（对真实运行中的 memory 服务写入 + 召回，证明契约真的对得上，不是靠 stub 自证）
+- **Important**：`FeignMemoryRecallAdapter` 的 `item.memory()` 解引用在 try 块外，脏数据触发的 NPE 会绕过
+  `MemoryRecallException` 直接让整个评审任务失败，违反「召回失败必须放行」的约束——已移进 try 块
+- **Important**：`FindingFilter` 过滤掉 Finding 时零日志，无法追溯；memory 不可用时每条 Finding 各产生一条
+  降级说明，会在公开 PR 评论里刷出重复的内部错误文本——已加 `log.info`（命中 fingerprint/category/规则内容），
+  召回失败的降级说明按根因合并成一条
+- **Minor**：LLM 判定失败后降级文本不含失败原因（已补 `lastError`）；「多候选只命中一条，不影响其他 Finding」
+  缺测试覆盖（已补 `onlyFindingMatchingRecalledRuleIsFiltered`）
+- Deferred minor（未修）：`FindingFilter` 逐条串行调 LLM，意见多的大 PR 会线性拉长评审时延，风格与 DAG 内
+  并行的 `ReviewAgent` 不一致
+
+验证命令与结果（2026-10-23，真实中间件 + 真实 `CODEMIND_LLM_API_KEY` / `GITHUB_TOKEN`，integration 8081 + memory 8083 + review 8082）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **真实 PR 上 👎 过的意见不再出现，真缺陷照常出现**（ROADMAP M9） | sandbox 新 PR #3（作者 `lan-bin`，head `bbcf401`）：新增 `VerificationTarget.java` 含 SECURITY/PERFORMANCE 同类代码 + 1 处真实 NPE（`remainingStock` 对 null 调 `intValue()`）；真实 webhook 触发评审 | **通过**。review 日志证明过滤器真实生效（无降级）：1 条 SECURITY Finding 命中 `[SECURITY] 不要求对内部来源的 sku 做 null/empty 校验` 被过滤、2 条 PERFORMANCE Finding 命中 `[PERFORMANCE] 允许单线程场景用普通 HashMap` 被过滤；真实发布到 GitHub 的评论（review `5630225538`）里确认：被过滤的两类意见原文均未出现（`null/empty` 字样仅出现在 diff 代码上下文和一条无关的 TEST 类"缺测试覆盖"意见里，经比对非否决意见复活）；`remainingStock` 的 NPE 风险作为 BLOCKER 行级意见正常出现（**但 LLM 把它归类为 `TEST` 而非预期的 `CORRECTNESS`**，过滤器按真实 category 召回判定，TEST 类不会命中 SECURITY/PERFORMANCE 的否决记忆，结果仍正确，只是分类与预想不同——记为观察项，非缺陷） |
+| 契约修复不是臆造 | `MemoryFeignClientIT`（对真实运行中的 memory 服务写入 + 召回） | **通过**，非跳过。修复前用同样的真实 wire format 反序列化会得到 `memories=null`（已用临时实验验证） |
+| 全仓回归 | `mvn verify`（真实中间件 + 真实 key，两轮：Task 5 装配验证 + Final Review 修复后复验） | **通过**。均为 8 模块 BUILD SUCCESS，0 Failures 0 Errors **0 Skipped**。真实 LLM/GitHub IT 全部实跑（`RealPullRequestReviewIT`、`CrossSessionMapReduceIT`、`MultiAgentIntegrationIT`、`ReviewAgentIT`、`FeedbackExtractorIT`），无跳过需说明 |
+
+遗留问题 / 技术债：
+
+- `FindingFilter` 逐条串行调用召回 + LLM，大 PR 意见多时会线性拉长评审时延（见上方 deferred minor）
+- Review Focus「CORRECTNESS 真缺陷不被语义相近的否决记忆误杀」的真实 LLM 语义判定能力，本次只靠 Task 6
+  这一次真实验收证明（1 个真缺陷样本），未补独立的 `FindingFilterIT` 做更系统的真实 LLM 回归；
+  若后续同类误杀复现（参考 M9a T6 的方向性错误教训），应补专门的真实 LLM IT
+- 真实验收用的 sandbox PR #3（`zlanbin/codemind-sandbox`）已发布评审，未清理（同 M8/M9a 的做法，留着不影响）
+- `minScore=0.05`、`topK=5` 仍是硬编码常量，与 M9a `FeedbackLearningService` 风格一致，但两处常量各自独立定义，
+  未来若要统一调整需要改两个地方
+
+与 ARCHITECTURE.md 的偏差：无需同步（7.2 第 5 步「Dedup & Filter 节点过滤同类意见」在 M9a 落地时已写明
+「留 M9b」，本次是把这句话实现出来，设计本身未变）。
 
 ### M9a 反馈进来（标记 → 轮询 👎 / 回复 → LLM 抽取 + 冲突消解）—— 完成于 2026-10-23
 
