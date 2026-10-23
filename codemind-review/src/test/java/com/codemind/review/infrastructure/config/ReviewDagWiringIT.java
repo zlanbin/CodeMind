@@ -48,6 +48,9 @@ class ReviewDagWiringIT {
     private com.fasterxml.jackson.databind.ObjectMapper sharedObjectMapper;
 
     @Autowired
+    private com.codemind.review.domain.finding.FindingFilter findingFilter;
+
+    @Autowired
     private com.codemind.review.domain.publication.ReviewOutboxRepository reviewOutboxRepository;
 
     @Autowired
@@ -68,6 +71,12 @@ class ReviewDagWiringIT {
         assertNotNull(dagScheduler);
         assertNotNull(reviewExecutionService);
         assertNotNull(scmContentPort, "Feign 适配器应实现 ScmContentPort");
+    }
+
+    /** M9b：Dedup & Filter 的 FindingFilter 及其 MemoryRecallPort 依赖应在真实容器里装配成功。 */
+    @Test
+    void contextLoadsWithFindingFilterBean() {
+        assertNotNull(findingFilter, "FindingFilter 应装配成 bean（FindingFilterConfig）");
     }
 
     /**

@@ -5,6 +5,10 @@ import com.codemind.review.domain.changemap.ChangeMapAgent;
 import com.codemind.review.domain.changemap.ChangeMapJsonParser;
 import com.codemind.review.domain.chunk.*;
 import com.codemind.review.domain.dag.*;
+import com.codemind.review.domain.finding.FindingFilter;
+import com.codemind.review.domain.memory.MemoryRecallException;
+import com.codemind.review.domain.memory.MemoryRecallPort;
+import com.codemind.review.domain.memory.RecalledMemory;
 import com.codemind.review.domain.scm.ScmContentException;
 import com.codemind.review.domain.scm.ScmContentPort;
 import com.codemind.review.domain.task.ReviewTask;
@@ -184,10 +188,45 @@ class ReviewExecutionServiceTest {
         assertTrue(requests.findByTaskId(task.taskId()).isPresent());
     }
 
+    @Test
+    void findingFilterRemovesFilteredFindingsBeforeReport() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        FindingFilter filterAll = new FindingFilter(
+                (project, query, topK, minScore) -> List.of(new RecalledMemory("某条否决规则", 0.8)),
+                (sys, user) -> "{\"filtered\": true}", 0);
+
+        service(filterAll, new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(0, task.report().totalFindings(), "唯一一条 Finding 被判定为同类否决意见，应被过滤");
+        assertTrue(task.report().degradations().isEmpty(), "过滤器本身未降级，不该产生降级说明");
+    }
+
+    @Test
+    void findingFilterDegradationIsMergedIntoReport() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        FindingFilter degradingFilter = new FindingFilter(
+                (project, query, topK, minScore) -> {
+                    throw new MemoryRecallException("memory 不可达", null);
+                },
+                (sys, user) -> { throw new AssertionError("召回已失败，不该调用 LLM"); }, 0);
+
+        service(degradingFilter, new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "召回失败要放行 Finding，不能压掉");
+        assertEquals(1, task.report().degradations().size(), "召回失败的降级说明要并入报告");
+    }
+
     // --- 装配 ---
 
     private ReviewExecutionService service() {
-        ScriptedLlmClient llm = new ScriptedLlmClient();
+        return service(passThroughFindingFilter(), new ScriptedLlmClient());
+    }
+
+    private ReviewExecutionService service(FindingFilter findingFilter, LlmClient llm) {
         ObjectMapper mapper = new ObjectMapper();
         FindingJsonParser findingParser = new FindingJsonParser(mapper);
         ChunkSummaryJsonParser summaryParser = new ChunkSummaryJsonParser(mapper);
@@ -212,7 +251,14 @@ class ReviewExecutionServiceTest {
                             protected void doRollback(org.springframework.transaction.support.DefaultTransactionStatus s) { }
                         })),
                 new com.codemind.review.domain.report.ReviewReportBuilder(),
-                com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer());
+                com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer(),
+                findingFilter);
+    }
+
+    /** 不召回任何候选，等价于「过滤器不生效」，让既有用例的断言不受影响。 */
+    private static FindingFilter passThroughFindingFilter() {
+        return new FindingFilter((project, query, topK, minScore) -> List.of(),
+                (sys, user) -> "{\"filtered\": false}", 0);
     }
 
     private ReviewTask insertedTask() {
@@ -356,6 +402,41 @@ class ReviewExecutionServiceTest {
             if (userPrompt.contains("方法签名变更（AST 提取")) {
                 return """
                         {"intent": "测试变更", "modules": ["test"], "highRiskFiles": []}
+                        """;
+            }
+            return """
+                    {"findings": [],
+                     "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                 "risks": [], "crossChunkQuestions": []}}
+                    """;
+        }
+    }
+
+    /**
+     * 像 {@link ScriptedLlmClient} 一样让链路跑完，但第一次切片评审调用产出 1 条真实 Finding，
+     * 供 Task 4 的过滤用例验证 {@code FindingFilter} 真的在 {@code reportBuilder.build} 之前生效。
+     */
+    private static final class OneFindingLlmClient implements LlmClient {
+        private boolean findingEmitted = false;
+
+        @Override
+        public String complete(String systemPrompt, String userPrompt) {
+            if (userPrompt.contains("【各切片摘要】")) {
+                return "{\"findings\": []}";
+            }
+            if (userPrompt.contains("方法签名变更（AST 提取")) {
+                return """
+                        {"intent": "测试变更", "modules": ["test"], "highRiskFiles": []}
+                        """;
+            }
+            if (!findingEmitted) {
+                findingEmitted = true;
+                return """
+                        {"findings": [{"file": "A.java", "line": 1, "severity": "BLOCKER",
+                         "category": "CORRECTNESS", "message": "可能空指针", "suggestion": "加判空",
+                         "codeSnippet": "int x = 1;"}],
+                         "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                     "risks": [], "crossChunkQuestions": []}}
                         """;
             }
             return """

@@ -44,6 +44,7 @@ public class ReviewExecutionService {
     private final com.codemind.review.domain.report.ReviewReportBuilder reportBuilder;
     private final com.codemind.review.domain.report.ReportPolicy reportPolicy;
     private final ReviewMarkdownRenderer renderer;
+    private final com.codemind.review.domain.finding.FindingFilter findingFilter;
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -55,7 +56,8 @@ public class ReviewExecutionService {
                                   ReviewCompletionService completion,
                                   com.codemind.review.domain.report.ReviewReportBuilder reportBuilder,
                                   com.codemind.review.domain.report.ReportPolicy reportPolicy,
-                                  ReviewMarkdownRenderer renderer) {
+                                  ReviewMarkdownRenderer renderer,
+                                  com.codemind.review.domain.finding.FindingFilter findingFilter) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -68,6 +70,7 @@ public class ReviewExecutionService {
         this.reportBuilder = Objects.requireNonNull(reportBuilder, "reportBuilder");
         this.reportPolicy = Objects.requireNonNull(reportPolicy, "reportPolicy");
         this.renderer = Objects.requireNonNull(renderer, "renderer");
+        this.findingFilter = Objects.requireNonNull(findingFilter, "findingFilter");
     }
 
     /**
@@ -138,7 +141,11 @@ public class ReviewExecutionService {
             } else {
                 result = orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, context);
             }
-            var report = reportBuilder.build(result.allFindings(), diffFiles, result.allDegradations(), reportPolicy);
+            var filterOutcome = findingFilter.filter(task.repo(), result.allFindings());
+            var report = reportBuilder.build(filterOutcome.kept(), diffFiles,
+                    java.util.stream.Stream.concat(result.allDegradations().stream(),
+                            filterOutcome.degradations().stream()).toList(),
+                    reportPolicy);
             task.assignReport(report);
             var comments = report.inline().stream().map(comment ->
                     new com.codemind.common.event.ReviewCompleted.LineComment(comment.path(), comment.line(),
