@@ -5,6 +5,8 @@ import com.codemind.review.application.ReviewCompletionService;
 import com.codemind.review.application.ReviewPublicationService;
 import com.codemind.review.domain.publication.ReviewOutboxRepository;
 import com.codemind.review.domain.task.*;
+import com.codemind.review.infrastructure.persistence.JdbcFingerprintRegistrationOutboxRepository;
+import com.codemind.review.infrastructure.persistence.JdbcLastReviewedHeadRepository;
 import com.codemind.review.infrastructure.persistence.JdbcReviewOutboxRepository;
 import com.codemind.review.infrastructure.persistence.JdbcReviewTaskRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -50,8 +52,9 @@ class ReviewPublishedListenerIT {
 
     @Configuration
     @EnableAutoConfiguration
-    @Import({JdbcReviewTaskRepository.class, JdbcReviewOutboxRepository.class, ReviewCompletionService.class,
-            ReviewPublicationService.class, ReviewPublishedListener.class})
+    @Import({JdbcReviewTaskRepository.class, JdbcReviewOutboxRepository.class,
+            JdbcLastReviewedHeadRepository.class, JdbcFingerprintRegistrationOutboxRepository.class,
+            ReviewCompletionService.class, ReviewPublicationService.class, ReviewPublishedListener.class})
     static class Config { }
 
     @Autowired private ReviewTaskRepository tasks;

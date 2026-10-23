@@ -292,6 +292,45 @@ class ReviewExecutionServiceTest {
     }
 
     @Test
+    void findingFilteredByMemoryRejectionDoesNotReachPublishedFingerprintCheck() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprintA = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.CORRECTNESS, "int x = 1;");
+        // FindingFilter（M9b）判定过滤掉 CORRECTNESS 的 Finding A；已发布指纹集合不含 A 的指纹，
+        // 证明 A 是被第一道（否决记忆）拦住的，不是靠第二道（已发布指纹）
+        FindingFilter filtersCorrectnessOnly = new FindingFilter(
+                (project, query, topK, minScore) -> List.of(new RecalledMemory("某条否决规则", 0.8)),
+                (sys, user) -> user.contains("CORRECTNESS") ? "{\"filtered\": true}" : "{\"filtered\": false}", 0);
+        taskFingerprints.published = Set.of();
+
+        service(filtersCorrectnessOnly, new TwoFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "只剩 PERFORMANCE 的 Finding B");
+        assertNotEquals(fingerprintA, task.report().inline().isEmpty() ? null
+                : task.report().inline().get(0).merged().get(0).fingerprint());
+    }
+
+    @Test
+    void findingPassingMemoryFilterButMatchingPublishedFingerprintIsStillFiltered() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprintB = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.PERFORMANCE, "performance snippet");
+        // FindingFilter 放行两条（召回不到任何候选）；已发布指纹集合只包含 B 的指纹，
+        // 证明 B 是被第二道（已发布指纹）单独拦住的
+        taskFingerprints.published = Set.of(fingerprintB);
+
+        service(passThroughFindingFilter(), new TwoFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "只剩 CORRECTNESS 的 Finding A");
+        var remaining = task.report().inline().get(0).merged().get(0);
+        assertEquals(com.codemind.review.domain.finding.Category.CORRECTNESS, remaining.category());
+    }
+
+    @Test
     void publishedFingerprintQueryFailurePassesThroughFindings() throws Exception {
         ReviewTask task = insertedTask();
         scm.diff = javaDiff();
@@ -551,6 +590,45 @@ class ReviewExecutionServiceTest {
      * 像 {@link ScriptedLlmClient} 一样让链路跑完，但第一次切片评审调用产出 1 条真实 Finding，
      * 供 Task 4 的过滤用例验证 {@code FindingFilter} 真的在 {@code reportBuilder.build} 之前生效。
      */
+    /**
+     * 产出 2 条不同 Finding（A：CORRECTNESS NPE；B：PERFORMANCE），供 Task 7 验证
+     * {@code FindingFilter}（M9b）与已发布指纹过滤（M10）两道独立过滤互不干扰。
+     */
+    private static final class TwoFindingLlmClient implements LlmClient {
+        private boolean findingEmitted = false;
+
+        @Override
+        public String complete(String systemPrompt, String userPrompt) {
+            if (userPrompt.contains("【各切片摘要】")) {
+                return "{\"findings\": []}";
+            }
+            if (userPrompt.contains("方法签名变更（AST 提取")) {
+                return """
+                        {"intent": "测试变更", "modules": ["test"], "highRiskFiles": []}
+                        """;
+            }
+            if (!findingEmitted) {
+                findingEmitted = true;
+                return """
+                        {"findings": [
+                         {"file": "A.java", "line": 1, "severity": "BLOCKER",
+                          "category": "CORRECTNESS", "message": "可能空指针", "suggestion": "加判空",
+                          "codeSnippet": "int x = 1;"},
+                         {"file": "A.java", "line": 1, "severity": "MINOR",
+                          "category": "PERFORMANCE", "message": "可优化", "suggestion": "无需改动",
+                          "codeSnippet": "performance snippet"}],
+                         "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                     "risks": [], "crossChunkQuestions": []}}
+                        """;
+            }
+            return """
+                    {"findings": [],
+                     "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                 "risks": [], "crossChunkQuestions": []}}
+                    """;
+        }
+    }
+
     private static final class OneFindingLlmClient implements LlmClient {
         private boolean findingEmitted = false;
 

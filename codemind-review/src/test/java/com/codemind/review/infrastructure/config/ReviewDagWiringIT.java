@@ -65,6 +65,15 @@ class ReviewDagWiringIT {
     @Autowired
     private com.codemind.review.interfaces.mq.ReviewPublishedListener reviewPublishedListener;
 
+    @Autowired
+    private com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository;
+
+    @Autowired
+    private com.codemind.review.domain.finding.TaskFingerprintPort taskFingerprintPort;
+
+    @Autowired
+    private com.codemind.review.application.FingerprintRegistrationDispatcher fingerprintRegistrationDispatcher;
+
     @Test
     void contextLoadsWithAllDagBeans() {
         assertNotNull(dagOrchestrator, "DagOrchestrator 应装配成 bean（M3~M6 一直只在测试里 new）");
@@ -77,6 +86,18 @@ class ReviewDagWiringIT {
     @Test
     void contextLoadsWithFindingFilterBean() {
         assertNotNull(findingFilter, "FindingFilter 应装配成 bean（FindingFilterConfig）");
+    }
+
+    /**
+     * M10：增量评审的全量/增量分流、已发布指纹过滤、指纹登记账本 dispatcher 依赖应在真实容器里装配成功。
+     * 两个 @FeignClient 都指向 codemind-memory（MemoryFeignClient、TaskFingerprintFeignClient）曾在真实
+     * 容器里因同名 FeignClientSpecification 冲突报 BeanDefinitionOverrideException，这条断言正好守住这一点。
+     */
+    @Test
+    void contextLoadsWithM10Beans() {
+        assertNotNull(lastReviewedHeadRepository, "LastReviewedHeadRepository 应装配成 bean");
+        assertNotNull(taskFingerprintPort, "TaskFingerprintPort 应装配成 bean（FeignTaskFingerprintAdapter）");
+        assertNotNull(fingerprintRegistrationDispatcher, "指纹登记 dispatcher 应装配成 bean（FingerprintSchedulingConfig）");
     }
 
     /**
