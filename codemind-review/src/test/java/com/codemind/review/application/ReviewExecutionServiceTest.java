@@ -41,6 +41,7 @@ class ReviewExecutionServiceTest {
     private final RecordingScmContentPort scm = new RecordingScmContentPort();
     private final StubTaskRepository tasks = new StubTaskRepository();
     private final ReviewOutboxDispatcherTest.MemoryOutbox requests = new ReviewOutboxDispatcherTest.MemoryOutbox();
+    private final StubLastReviewedHeadRepository lastReviewedHeads = new StubLastReviewedHeadRepository();
 
     @Test
     void skipsJavaDeletedFilesWhenCollectingSourcePaths() {
@@ -220,6 +221,61 @@ class ReviewExecutionServiceTest {
         assertEquals(1, task.report().degradations().size(), "召回失败的降级说明要并入报告");
     }
 
+    @Test
+    void firstReviewUsesFullDiffWhenNoLastReviewedHead() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        lastReviewedHeads.found = Optional.empty();
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchDiffCalled, "没有历史基准，应走全量 diff");
+        assertFalse(scm.fetchCompareDiffCalled, "不该调用 compare API");
+    }
+
+    @Test
+    void secondPushUsesCompareDiffWhenBaseUnchanged() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareResult = new com.codemind.review.domain.scm.CompareResult("ahead", javaDiff());
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "base 未变，应走增量 compare API");
+        assertFalse(scm.fetchDiffCalled, "增量成功时不该再取全量 diff");
+        assertEquals("previous-head-sha", scm.comparedOldHead);
+        assertEquals(HEAD, scm.comparedNewHead);
+    }
+
+    @Test
+    void fallsBackToFullDiffWhenBaseShaChanged() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, "different-base-sha", "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchDiffCalled, "base 变了（rebase 场景）应回退全量 diff");
+        assertFalse(scm.fetchCompareDiffCalled, "base 不一致时不该调用 compare API");
+    }
+
+    @Test
+    void fallsBackToFullDiffWhenCompareStatusNotAhead() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareResult = new com.codemind.review.domain.scm.CompareResult("diverged", "");
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "应先尝试 compare API");
+        assertTrue(scm.fetchDiffCalled, "status 非 ahead 应回退全量 diff");
+    }
+
     // --- 装配 ---
 
     private ReviewExecutionService service() {
@@ -252,7 +308,7 @@ class ReviewExecutionServiceTest {
                         })),
                 new com.codemind.review.domain.report.ReviewReportBuilder(),
                 com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer(),
-                findingFilter);
+                findingFilter, lastReviewedHeads);
     }
 
     /** 不召回任何候选，等价于「过滤器不生效」，让既有用例的断言不受影响。 */
@@ -292,9 +348,16 @@ class ReviewExecutionServiceTest {
         private List<String> requestedPaths;
         private String requestedRef;
         private ScmContentException failure;
+        private boolean fetchDiffCalled;
+        private boolean fetchCompareDiffCalled;
+        private String comparedOldHead;
+        private String comparedNewHead;
+        private com.codemind.review.domain.scm.CompareResult compareResult =
+                new com.codemind.review.domain.scm.CompareResult("ahead", "");
 
         @Override
         public String fetchDiff(String repo, int prNumber) {
+            fetchDiffCalled = true;
             if (failure != null) {
                 throw failure;
             }
@@ -311,7 +374,10 @@ class ReviewExecutionServiceTest {
         @Override
         public com.codemind.review.domain.scm.CompareResult fetchCompareDiff(
                 String repo, String oldHead, String newHead) {
-            throw new UnsupportedOperationException("本测试类未覆盖 compareDiff，见 Task 3 的新用例");
+            fetchCompareDiffCalled = true;
+            comparedOldHead = oldHead;
+            comparedNewHead = newHead;
+            return compareResult;
         }
     }
 
@@ -362,6 +428,21 @@ class ReviewExecutionServiceTest {
         @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
             statusHistory.add(status);
+        }
+    }
+
+    private static final class StubLastReviewedHeadRepository
+            implements com.codemind.review.domain.task.LastReviewedHeadRepository {
+        private Optional<com.codemind.review.domain.task.LastReviewedHead> found = Optional.empty();
+
+        @Override
+        public Optional<com.codemind.review.domain.task.LastReviewedHead> findFor(String repo, int prNumber) {
+            return found;
+        }
+
+        @Override
+        public void upsert(String repo, int prNumber, String baseSha, String headSha) {
+            throw new UnsupportedOperationException("ReviewExecutionService 不调用 upsert，见 Task 6");
         }
     }
 

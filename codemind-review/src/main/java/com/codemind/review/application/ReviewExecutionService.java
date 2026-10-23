@@ -45,6 +45,7 @@ public class ReviewExecutionService {
     private final com.codemind.review.domain.report.ReportPolicy reportPolicy;
     private final ReviewMarkdownRenderer renderer;
     private final com.codemind.review.domain.finding.FindingFilter findingFilter;
+    private final com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository;
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -57,7 +58,8 @@ public class ReviewExecutionService {
                                   com.codemind.review.domain.report.ReviewReportBuilder reportBuilder,
                                   com.codemind.review.domain.report.ReportPolicy reportPolicy,
                                   ReviewMarkdownRenderer renderer,
-                                  com.codemind.review.domain.finding.FindingFilter findingFilter) {
+                                  com.codemind.review.domain.finding.FindingFilter findingFilter,
+                                  com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -71,6 +73,7 @@ public class ReviewExecutionService {
         this.reportPolicy = Objects.requireNonNull(reportPolicy, "reportPolicy");
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.findingFilter = Objects.requireNonNull(findingFilter, "findingFilter");
+        this.lastReviewedHeadRepository = Objects.requireNonNull(lastReviewedHeadRepository, "lastReviewedHeadRepository");
     }
 
     /**
@@ -111,7 +114,7 @@ public class ReviewExecutionService {
         }
 
         try {
-            String diffText = scmContentPort.fetchDiff(task.repo(), task.prNumber());
+            String diffText = resolveDiff(task);
             List<DiffFile> diffFiles = new DiffParser().parse(diffText);
             List<String> sourcePaths = sourcePathsOf(diffFiles);
             Map<String, String> newSources =
@@ -157,6 +160,23 @@ public class ReviewExecutionService {
             markFailed(task);
             throw new IllegalStateException("评审执行失败 taskId=" + taskId, e);
         }
+    }
+
+    /**
+     * 取 diff：有上一次成功发布的基准、且 base 未变时走增量 compare API（M10），否则回退到整份
+     * PR diff。compare status 非 {@code ahead}（如 rebase 后的 diverged）同样回退全量
+     * （{@code docs/plans/M10.md} D5/D9）。
+     */
+    private String resolveDiff(ReviewTask task) {
+        var last = lastReviewedHeadRepository.findFor(task.repo(), task.prNumber());
+        if (last.isPresent() && last.get().baseSha().equals(task.baseSha())) {
+            var compare = scmContentPort.fetchCompareDiff(task.repo(), last.get().headSha(), task.headSha());
+            if (compare.isAhead()) {
+                return compare.diffText();
+            }
+            log.info("compare status={} 非 ahead，回退全量 diff taskId={}", compare.status(), task.taskId());
+        }
+        return scmContentPort.fetchDiff(task.repo(), task.prNumber());
     }
 
     /**
