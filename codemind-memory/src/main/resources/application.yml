@@ -10,6 +10,27 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         username: ${NACOS_USERNAME:nacos}
         password: ${NACOS_PASSWORD:nacos}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:codemind}
+    username: ${POSTGRES_USER:codemind}
+    password: ${POSTGRES_PASSWORD:codemind}
+  flyway:
+    # 独立 schema 与独立迁移目录，与 review（public）、integration 的历史互不扫描（M8 D13）
+    enabled: true
+    default-schema: memory
+    schemas: memory
+    locations: classpath:db/memory-migration
+    baseline-on-migrate: false
+
+codemind:
+  memory:
+    # decay(Δt) = 0.5^(Δt / half-life)，Δt 从最近一次写入（强化）算起
+    half-life: ${CODEMIND_MEMORY_HALF_LIFE:30d}
+    # importance × decay 低于该值的记忆在归档时转 ARCHIVED
+    archive-threshold: ${CODEMIND_MEMORY_ARCHIVE_THRESHOLD:0.05}
+    # 向量与三元组两路各取的候选数
+    candidate-limit: ${CODEMIND_MEMORY_CANDIDATE_LIMIT:50}
+    default-top-k: 5
 
 management:
   endpoints:

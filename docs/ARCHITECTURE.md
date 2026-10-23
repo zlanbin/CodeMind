@@ -35,7 +35,8 @@ PR 提交后自动触发多 Agent 并行评审，按代码规范、安全、性�
 | 基础 | Java 21（release 21）、Spring Boot 3.5.16、Spring Cloud 2025.0.3、Spring Cloud Alibaba 2025.0.0.0 | 虚拟线程用于 DAG 并行 |
 | 注册/配置 | Nacos 3.0.x | |
 | 网关 | Spring Cloud Gateway | |
-| AI | Spring AI 1.1.8（OpenAI 兼容协议，可接 DeepSeek/通义） | 结构化输出、Embedding |
+| AI | Spring AI 1.1.8（OpenAI 兼容协议，可接 DeepSeek/通义） | 结构化输出。Embedding 暂未接（中转端点无 embedding 模型），memory 用本地特征哈希，见 7.3 |
+| 文本检索 | pgvector 0.8（余弦）+ pg_trgm（三元组相似度） | memory 两路召回，见 7.3 |
 | 数据库 | PostgreSQL 16 + pgvector | 关系与向量同库 |
 | 缓存 | Redis 7 | 任务记忆、幂等键、限流 |
 | MQ | RocketMQ 5.x | 领域事件 |
@@ -291,6 +292,18 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 | L2 项目长期记忆 | 团队规范、被否决的意见模式、常见缺陷 | PgVector | 长期，带衰减 |
 | L3 开发者画像 | 常犯错误、偏好的评审风格 | PG | 长期 |
 
+M8 落地范围（计划 `docs/plans/M8.md`）：L2 写入 / 混合召回 / 归档 / 人工删除；L1 只落了**已发布指纹**
+（PG `memory.task_fingerprint`，按 `(repo, pr_number)`，M10 增量去重用）。ChangeMap / ChunkSummary 的跨 push 复用
+与 Redis 层留 M10，L3 未做。review 侧 RecallContext 接线与 Dedup & Filter 留 M9。
+
+存储：独立 schema `memory`（Flyway `db/memory-migration`，同 integration 做法）。L2 表 `memory.memory`：
+`(project, kind, content_hash)` 唯一，`kind ∈ {CONVENTION, REJECTED_PATTERN, COMMON_DEFECT}`，`status ∈ {ACTIVE, ARCHIVED}`，
+`embedding vector(256)`。同内容再次写入 = 强化：importance 取较大者、`reinforced_at` 刷新、ARCHIVED 复活。
+
+对内端点（**无鉴权**，与 3.3 的 integration internal 端点同一缺口）：`POST /internal/memories`、
+`POST /internal/memories/recall`、`DELETE /internal/memories/{id}`、`POST /internal/memories/archive?project=`、
+`POST|GET /internal/task-fingerprints`。
+
 ### 7.2 反馈学习闭环
 
 1. 开发者在评论下回复 👎 或「不适用，因为…」
@@ -305,6 +318,20 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 - 打分：`score = similarity × importance × decay(Δt)`，取 top-k 注入 prompt
 - 遗忘：score 长期低于阈值的记忆归档；支持人工删除错误记忆
 
+M8 的具体取法：
+
+- 候选：本 project 的 ACTIVE 记忆中，向量余弦最近的 N 条 ∪ pg_trgm `similarity()` 最高的 N 条（`N = max(topK, 50)`），
+  两路相似度都带回。两路都是按 `(project, status)` 过滤后的**精确扫描**：不建 HNSW（全表近似索引带过滤会拿不满 N），
+  不用 `%`/GIN（默认阈值 0.3 会滤掉中文近义句）。「全文检索」用三元组而非 `tsvector`：默认分词切不开中文
+- `similarity = max(clamp(向量余弦), clamp(三元组))`，clamp 到 [0,1]、NaN 按 0
+- `importance ∈ (0, 1]` 由写入方给，缺省 0.5；`decay(Δt) = 0.5^(Δt / 半衰期)`，半衰期默认 30 天，
+  Δt 从 `reinforced_at` 算起，**召回不刷新它**（读不改状态，排序可复现）
+- 排序：score 降序 → importance 降序 → id 升序；过滤 `score ≥ minScore`（默认 0），取 top-k（≤ 50）。
+  打分与排序是 domain 纯函数 `MemoryRanker`，返回值带 similarity / decay / score 分项
+- 遗忘：`retention = importance × decay(Δt)` 与查询无关，低于阈值（默认 0.05）转 ARCHIVED。手动触发，无定时任务
+- Embedding：domain 端口 `Embedder`，当前实现 `HashingEmbedder`（字符 bigram + ASCII 词特征哈希，256 维，确定性）。
+  中转端点没有 embedding 模型；它只认字面重叠，不懂同义改写。换真实模型 = 换适配器 + 新迁移改列维度并重算
+
 ## 8. 设计决策记录
 
 | 决策 | 理由 |
@@ -316,3 +343,6 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 | 只有 integration 直连 GitHub，review 经 internal 端点取内容 | GitHub Token 只在一个服务里；review 不感知 SCM 平台，换 GitLab 只动 integration |
 | 回写走 review outbox + integration 独立 schema 账本，结果不明只核查不重发（M7b） | 外部写入做错要手工清理：宁可停在 `UNCERTAIN` 等人工，也不重复发评论。两个服务各管自己的表，不跨服务事务 |
 | 报告规则与渲染在 review，integration 只发送 | 噪声控制（合并、门槛、上限）是评审语义；换 SCM 平台不用重做 |
+| 记忆打分与排序放 domain 纯函数，SQL 只取候选（M8） | 「排序符合公式」可单测直证；换存储或索引不动公式 |
+| 记忆召回用三元组代替 PG 全文分词、精确扫描代替近似索引（M8） | 中文分词不可用；HNSW 带项目过滤会漏候选。单项目数万条后再上 `hnsw.iterative_scan` / GIN |
+| memory 先用本地特征哈希 embedding（M8） | 现有中转端点无 embedding 模型；端口隔离，换模型只动适配器与列维度 |

@@ -5,24 +5,32 @@
 
 ## 当前状态
 
-- 当前里程碑：**M7b 已完成**（回写 PR：总结 + 行级评论 + `PUBLISHED`）。M7 整体完成，M0~M7 最小可演示版本就绪
+- 当前里程碑：**M8 已完成**（memory-service：L2 记忆写入 / 混合召回 / 打分 / 归档，L1 已发布指纹）
 - 上次更新：2026-10-23
-- 分支：`feat/m7b-publish`（基于 master `2a52baa`），改动**全在工作区、未提交**，待用户说「代码提交」
+- 分支：`feat/m8-memory`（基于 master `e94223e`），改动**全在工作区、未提交**，待用户说「代码提交」
 - 阻塞项：无
-- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过；真实写验收实跑通过，见 M7b 节）
+- 未验证项：无（全量 `mvn verify` 带真实 key 0 跳过，见 M8 节）
 
 ## 下一个会话要做的事
 
-**先收尾 M7b 的提交**（若本会话未做）：`feat/m7b-publish` 提交、推送、开 PR 到 master。然后进 **M8：memory-service（L1/L2 记忆、混合检索）**。
+**先收尾 M8 的提交**（若本会话未做）：`feat/m8-memory` 提交、推送、开 PR 到 master。然后进 **M9：反馈闭环与冲突消解**。
 
-验证点（ROADMAP M8）：单测：写入与召回排序符合打分公式。ARCHITECTURE 7 是设计输入。
+验证点（ROADMAP M9）：对某条意见 👎 后再提同类代码，该意见不再出现。ARCHITECTURE 7.2 是设计输入。
+M9 会往真实 PR 读反馈（只读）并可能回写，按 WORKFLOW「往外部系统写东西」在首次真实调用前停下确认。
 
-待用户决定的清理（不阻塞 M8）：
-- Task 5 留下的测试库 `codemind_task5_reviewfix`、`codemind_task5_clean_green` 是否删除
-- 本地分支 `feat/m7a-entry-chain`（已合并，远程已删）是否删除
-- sandbox PR #2 上有两个 CodeMind review：`5624353955`（上个会话，无测试标记，工具清不掉）与 `5624674315`（本会话）。留着不影响
+M8 可直接复用：
+- 写入 / 强化：`POST /internal/memories {project, kind, content, importance?}`，`kind=REJECTED_PATTERN` 就是 M9 的否决记忆；
+  同内容再写 = 强化（importance 取大、刷新衰减起点、ARCHIVED 复活）
+- 召回：`POST /internal/memories/recall {project, query, topK?, kind?, minScore?}`，每条带 similarity / decay / score。
+  **`minScore` 默认 0 会带回低分无关记忆**，M9 的 Dedup & Filter 要定阈值（建议先用真实反馈样本校准）
+- 指纹：`POST|GET /internal/task-fingerprints`（M10 增量去重）
+- review 侧还没有 memory 的 Feign 客户端，M9 新建；两侧 DTO 各自定义
+- Embedding 是本地特征哈希（只认字面重叠）。M9 若判定「同类代码」需要语义相似，可能得换真实 embedding 模型
 
-可直接复用：
+清理状态：
+- sandbox PR #2 上有两个 CodeMind review：`5624353955`（无测试标记，工具清不掉）与 `5624674315`。留着不影响
+
+M7 可直接复用：
 - 回写链路：`ReviewExecutionService` 到 `AGGREGATING` 后自动登记 outbox → MQ → integration `ReviewPublishService` → GitHub。
   M9 反馈闭环要读 PR 评论时，integration 的 `GithubScmClient` 已有分页 `listReviews`
 - 报告：`ReviewReportBuilder.build(findings, diffFiles, sourcePaths, ReportPolicy)` → `ReviewReport`；
@@ -75,6 +83,50 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M8 memory-service（L1/L2 记忆、混合检索）—— 完成于 2026-10-23
+
+计划与设计共识 `docs/plans/M8.md`（D1~D13；用户授权「以推荐为准」，S1/S3 未单独停）。
+
+改动范围（只动 `codemind-memory`）：
+
+- pom 加 jdbc / postgresql / flyway（+ postgresql 模块）/ failsafe；`application.yml` 加数据源、独立 schema `memory` 的 Flyway、
+  `codemind.memory.*`（半衰期 30d、归档阈值 0.05、候选数 50、默认 top-k 5）；测试 properties（Hikari 池 2、关 Nacos）
+- `db/memory-migration/V1__create_memory.sql`：`memory.memory`（vector(256)、`(project, kind, content_hash)` 唯一、
+  `(project, status)` 索引，**无 HNSW / GIN**）、`memory.task_fingerprint`
+- domain `memory`：`Memory` / `MemoryKind` / `MemoryStatus` / `MemoryContent`（归一化 + SHA-256）/ `MemoryCandidate` /
+  端口 `MemoryRepository`、`Embedder`；`recall`：`ScoringPolicy`（decay / score / retention / archiveCutoff）/ `MemoryRanker` /
+  `ScoredMemory`；`fingerprint`：端口 `TaskFingerprintRepository`
+- application：`MemoryService`（write / recall / archiveStale / delete，注入 `Clock` 截到微秒）、`MemorySettings`、`TaskFingerprintService`
+- infrastructure：`HashingEmbedder`、`JdbcMemoryRepository`（两路候选 union、`xmax = 0` 判新建、按 `reinforced_at` 条件归档）、
+  `JdbcTaskFingerprintRepository`、`MemoryConfig` / `MemoryProperties`
+- interfaces：`MemoryController`、`TaskFingerprintController`、`MemoryExceptionHandler`、`dto/MemoryDtos`
+- `MemoryApplicationTest` 改名 `MemoryApplicationIT`（M8 起依赖 PG）
+
+验证命令与结果（2026-10-23，真实中间件 + 真实 `CODEMIND_LLM_API_KEY` / `GITHUB_TOKEN`，integration 跑在 8081）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **召回排序符合打分公式**（ROADMAP M8，纯单测） | `MemoryRankerTest`（10 例）、`ScoringPolicyTest`（8 例） | **通过**。含 40 条随机候选按测试内独立重算的公式排序比对、importance 压过 similarity、衰减把旧记忆排后、逐路 clamp（含 NaN）、合并两路、并列规则、topK / minScore、ARCHIVED 不参与 |
+| **写入**符合语义（去重 / 强化 / 复活） | `MemoryContentTest`（5 例，纯单测）+ `JdbcMemoryRepositoryIT`（9 例） | **通过**。归一化同 hash；importance 取大、`reinforced_at` 不倒退、ARCHIVED 复活、同内容不同 kind 分开 |
+| 端到端：真实 PG 上召回顺序与分数 = 公式 | `MemoryControllerIT.recallOrderAndScoresFollowTheFormula` | **通过**。可控时钟下 60 天前写入的记忆 decay=0.25 排到新记忆后；每条 score 与测试独立计算的 `max(余弦, pg_trgm) × importance × decay` 差 < 1e-5 |
+| 两路召回互相独立 | `JdbcMemoryRepositoryIT.textChannelReturnsRowsTheVectorLimitWouldCut` | **通过**。构造「向量近、三元组 0」干扰项，limit=1 时目标只能经三元组一路进入 |
+| 归档 / 人工删除 / 参数校验 / 指纹 | `MemoryControllerIT` 其余 5 例、`MemoryServiceTest`（6）、`TaskFingerprintServiceTest`（3）、`JdbcTaskFingerprintRepositoryIT`（1） | **通过** |
+| 全仓回归 | `mvn verify`（不带过滤） | **通过**。8 模块 BUILD SUCCESS，**450 测试 0 失败 0 错误 0 跳过**（common 6；gateway 1；integration 127 + 28 IT；review 174 + 51 IT；memory 37 + 17 IT；rule / admin 各 1）。真实 LLM/GitHub IT 均实跑：RealPullRequestReviewIT 45s、CrossSessionMapReduceIT 70s、MultiAgentIntegrationIT 11s、ReviewAgentIT 11s |
+
+S6 评审（固定点 `e94223e`，标准轴 / 规格轴两个独立子代理）：标准轴 0 硬违规；规格轴 2 严重
+（HNSW 带 project 过滤拿不满候选、`Math.max(NaN, x)` 吞另一路），连同 10 余条判断题已回 S5 修复，明细见 `docs/plans/M8.md` S6 节。
+
+遗留问题 / 技术债：
+- `DELETE /internal/memories/{id}` 不按 project 限定；全部 internal 端点无鉴权（同 M7a 缺口）
+- `minScore` 默认 0：向量一路总返回最近 N 条，低分无关记忆也会回来，M9 注入 prompt 前要定阈值
+- Embedding 是本地特征哈希，不懂同义改写；维度写死在 V1，换模型要新迁移重算
+- 两路召回都是精确扫描（单项目数万条后需 `hnsw.iterative_scan` / GIN + `set local` 阈值）
+- 指纹逐条 insert（单批 ≤ 1000）；归档无定时任务（手动端点）
+- L1 的 ChangeMap / ChunkSummary 复用、Redis 层、L3 画像未做；review 侧未接 memory
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**。2 技术栈（Embedding 暂未接、pgvector + pg_trgm）；7.1 补 M8 落地范围、存储、端点；
+7.3 补候选、similarity 融合、decay、排序、遗忘、Embedding 的具体取法；8 加三条决策。
 
 ### M7b 回写 PR（总结 + 行级评论 + PUBLISHED）—— 完成于 2026-10-23
 
@@ -701,6 +753,11 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-23 | M7b | 验收 IT 三阶段（prepare / cleanup / publish），删除须带确认 id 集合 | S6 规格轴发现 prepare 未经门禁就删评论；拆出独立阶段让「清理」与「发布」各自授权 |
 | 2026-10-23 | M7b | 显式验收缺前置判失败，不 `assumeTrue` | 跳过会让 `-Pgithub-write` 什么都没验也亮绿灯（S6 规格轴发现，计划 Global Constraints 原本就要求） |
 | 2026-10-23 | M7b | SUMMARY_ONLY 422 无限重试留作技术债 | 修复需要新终态与告警，属设计改动；当前只会重复调 GitHub、不会重复写入 |
+| 2026-10-23 | M8 | 本地特征哈希 embedding，不接 Spring AI Embedding | 中转端点 `/v1/models` 只有 Claude 系列，无 embedding 模型（实测）；端口隔离，换模型只动适配器 + 列维度 |
+| 2026-10-23 | M8 | 「全文检索」用 pg_trgm `similarity() > 0`，不用 tsvector、不建 GIN | 默认分词切不开中文；`%` 默认阈值 0.3 滤掉中文近义句（实测 0.19） |
+| 2026-10-23 | M8 | 向量一路不建 HNSW，按 project 过滤后精确扫描 | 全表 HNSW 带过滤先取全局 ef_search=40 近邻再过滤，小项目拿不满候选（S6 双轴） |
+| 2026-10-23 | M8 | 召回不刷新 `reinforced_at`，衰减只从写入（强化）算起 | 读不改状态，排序可复现；M9 反馈强化走写入路径 |
+| 2026-10-23 | M8 | L1 只做已发布指纹（PG），ChangeMap/ChunkSummary 复用与 Redis 留 M10 | 没有 M10 的调用方就无从验证；指纹要比 Redis 更持久 |
 
 ## 环境与常用命令
 
