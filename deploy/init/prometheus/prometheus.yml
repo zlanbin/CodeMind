@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'codemind-services'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:8080'  # gateway
+          - 'host.docker.internal:8081'  # integration
+          - 'host.docker.internal:8082'  # review
+          - 'host.docker.internal:8083'  # memory
+          - 'host.docker.internal:8084'  # rule
+          - 'host.docker.internal:8085'  # admin
+        labels:
+          group: 'codemind'

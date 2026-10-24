@@ -37,7 +37,7 @@ class ReviewAgentTest {
         }
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) throws LlmException {
+        public String complete(String systemPrompt, String userPrompt, String callSite) throws LlmException {
             calls++;
             Object next = responses.isEmpty() ? "" : responses.poll();
             if (next instanceof LlmException e) {
@@ -120,7 +120,7 @@ class ReviewAgentTest {
         String lastUserPrompt;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) throws LlmException {
+        public String complete(String systemPrompt, String userPrompt, String callSite) throws LlmException {
             lastUserPrompt = userPrompt;
             return VALID;
         }

@@ -50,7 +50,7 @@ class CrossSessionMapReduceTest {
     @BeforeEach
     void setUp() {
         nodeRuns = new InMemoryNodeRunRepository();
-        scheduler = new DagScheduler(nodeRuns, Duration.ofSeconds(20), 0);
+        scheduler = new DagScheduler(nodeRuns, (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(20), 0);
         llm = new ScriptedLlmClient();
         FindingJsonParser findingParser = new FindingJsonParser();
         ChunkSummaryJsonParser summaryParser = new ChunkSummaryJsonParser();
@@ -289,7 +289,7 @@ class CrossSessionMapReduceTest {
         private volatile boolean breakGlobalReduce = false;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             prompts.add(userPrompt);
 
             if (userPrompt.contains("【各切片摘要】")) {

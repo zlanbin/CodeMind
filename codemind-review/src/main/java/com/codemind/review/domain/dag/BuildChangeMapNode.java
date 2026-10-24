@@ -50,6 +50,11 @@ public final class BuildChangeMapNode implements Node {
     }
 
     @Override
+    public String nodeType() {
+        return "BUILD_CHANGE_MAP";
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     public ChangeMap execute(NodeContext context) {
         String diffText = context.getSharedState("diffText", String.class);

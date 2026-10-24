@@ -102,7 +102,11 @@ public final class FindingFilter {
         String lastError = "";
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                String raw = llmClient.complete(SYSTEM_PROMPT, user);
+                // "FINDING_FILTER" 是 M12 可观测性指标 call_site 标签的正式值（第 4 个调用方，
+                // 补充 brief/plan 原列的 STYLE/SECURITY/PERFORMANCE/TEST/CHANGE_MAP/GLOBAL_REDUCE
+                // 6 个）。已由协调者裁决确认，详见
+                // docs/superpowers/plans/2026-10-24-m12-observability-loadtest.md 的 Ruling 记录。
+                String raw = llmClient.complete(SYSTEM_PROMPT, user, "FINDING_FILTER");
                 return parse(raw);
             } catch (LlmException | IllegalArgumentException e) {
                 lastError = e.getMessage();

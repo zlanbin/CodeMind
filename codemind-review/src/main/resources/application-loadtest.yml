@@ -1,0 +1,4 @@
+# loadtest profile：用 StubLlmClient 替换真实 LLM，隔离网络抖动对压测数据的干扰（见 spec 3.1）
+codemind:
+  llm:
+    max-retries: 0  # stub 从不失败，不需要重试预算

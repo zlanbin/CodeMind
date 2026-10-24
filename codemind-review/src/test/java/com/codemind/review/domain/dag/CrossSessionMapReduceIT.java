@@ -79,7 +79,8 @@ class CrossSessionMapReduceIT {
         assertTrue(taskRepository.insertIfAbsent(task), "任务应插入成功");
 
         // 中转端点延迟波动大，实测轻量的 build-change-map 也可能超过 90s；真实 LLM IT 给足余量
-        DagScheduler scheduler = new DagScheduler(nodeRunRepository, Duration.ofSeconds(240), 1);
+        DagScheduler scheduler = new DagScheduler(nodeRunRepository,
+                (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(240), 1);
         DagOrchestrator orchestrator =
                 new DagOrchestrator(scheduler, reviewAgents, globalReduceAgent, taskRepository);
 

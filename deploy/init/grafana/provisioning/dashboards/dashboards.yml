@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: codemind
+    folder: CodeMind
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards/files

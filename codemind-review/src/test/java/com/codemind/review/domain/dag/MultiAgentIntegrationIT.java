@@ -45,7 +45,8 @@ class MultiAgentIntegrationIT {
         // 只在有真实 key 时跑，否则跳过（与 ReviewAgentIT 一致）
         assumeTrue(hasRealKey(), "未设置真实 CODEMIND_LLM_API_KEY，跳过真实 LLM 多 Agent IT");
 
-        DagScheduler scheduler = new DagScheduler(nodeRunRepository, Duration.ofSeconds(30), 2);
+        DagScheduler scheduler = new DagScheduler(nodeRunRepository,
+                (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(30), 2);
         DagOrchestrator orchestrator = new DagOrchestrator(scheduler, reviewAgents);
 
         // 构造一个含明显问题的 chunk（空指针风险 + 异常吞没 + 命名问题）

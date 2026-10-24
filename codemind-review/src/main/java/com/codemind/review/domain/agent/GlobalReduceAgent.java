@@ -84,7 +84,7 @@ public final class GlobalReduceAgent {
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             attempts++;
             try {
-                String raw = llmClient.complete(SYSTEM_PROMPT, userPrompt);
+                String raw = llmClient.complete(SYSTEM_PROMPT, userPrompt, "GLOBAL_REDUCE");
                 List<Finding> findings = parser.parse(raw);
                 log.info("全局归约完成：读 {} 份摘要 → {} 条跨文件意见（尝试 {}/{}）",
                         summaries.size(), findings.size(), attempt + 1, maxRetries + 1);

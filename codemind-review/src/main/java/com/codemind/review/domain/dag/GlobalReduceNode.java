@@ -53,6 +53,11 @@ public final class GlobalReduceNode implements Node {
     }
 
     @Override
+    public String nodeType() {
+        return "GLOBAL_REDUCE";
+    }
+
+    @Override
     public GlobalReduceResult execute(NodeContext context) {
         List<ChunkSummary> summaries = new ArrayList<>();
         for (String sourceId : chunkReduceNodeIds) {

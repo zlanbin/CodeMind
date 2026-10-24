@@ -38,7 +38,7 @@ class DagOrchestratorTest {
     @BeforeEach
     void setUp() {
         repo = new InMemoryNodeRunRepository();
-        scheduler = new DagScheduler(repo, Duration.ofSeconds(10), 1);
+        scheduler = new DagScheduler(repo, (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(10), 1);
 
         // 4 个 stub Agent：每个返回固定 Finding
         FindingJsonParser parser = new FindingJsonParser();
@@ -205,7 +205,7 @@ class DagOrchestratorTest {
         }
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             return response;
         }
     }

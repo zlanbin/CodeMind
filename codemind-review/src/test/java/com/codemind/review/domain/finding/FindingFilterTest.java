@@ -19,7 +19,7 @@ class FindingFilterTest {
     @Test
     void passesThroughWhenNoCandidatesRecalled() {
         MemoryRecallPort recall = (project, query, topK, minScore) -> List.of();
-        LlmClient llm = (sys, user) -> {
+        LlmClient llm = (sys, user, callSite) -> {
             throw new AssertionError("不该调用 LLM：无候选");
         };
         var filter = new FindingFilter(recall, llm, 1);
@@ -35,7 +35,7 @@ class FindingFilterTest {
         MemoryRecallPort recall = (project, query, topK, minScore) -> {
             throw new MemoryRecallException("memory 不可达", null);
         };
-        LlmClient llm = (sys, user) -> {
+        LlmClient llm = (sys, user, callSite) -> {
             throw new AssertionError("不该调用 LLM：召回已失败");
         };
         var filter = new FindingFilter(recall, llm, 1);
@@ -50,7 +50,7 @@ class FindingFilterTest {
     void filtersOutWhenLlmJudgesSameCategory() {
         MemoryRecallPort recall = (project, query, topK, minScore) ->
                 List.of(new RecalledMemory("本项目不要求对内部来源的 sku 做 null/empty 校验", 0.8));
-        LlmClient llm = (sys, user) -> "{\"filtered\": true}";
+        LlmClient llm = (sys, user, callSite) -> "{\"filtered\": true}";
         var filter = new FindingFilter(recall, llm, 1);
 
         FilterOutcome outcome = filter.filter("org/repo", List.of(NPE_FINDING));
@@ -62,7 +62,7 @@ class FindingFilterTest {
     void keepsWhenLlmJudgesDifferentIssue() {
         MemoryRecallPort recall = (project, query, topK, minScore) ->
                 List.of(new RecalledMemory("本项目允许在单线程访问场景下使用普通 HashMap", 0.6));
-        LlmClient llm = (sys, user) -> "{\"filtered\": false}";
+        LlmClient llm = (sys, user, callSite) -> "{\"filtered\": false}";
         var filter = new FindingFilter(recall, llm, 1);
 
         FilterOutcome outcome = filter.filter("org/repo", List.of(NPE_FINDING));
@@ -74,7 +74,7 @@ class FindingFilterTest {
     void passesThroughWhenLlmOutputMalformedAfterRetries() {
         MemoryRecallPort recall = (project, query, topK, minScore) ->
                 List.of(new RecalledMemory("某条记忆", 0.5));
-        LlmClient llm = (sys, user) -> "不是 JSON";
+        LlmClient llm = (sys, user, callSite) -> "不是 JSON";
         var filter = new FindingFilter(recall, llm, 0);
 
         FilterOutcome outcome = filter.filter("org/repo", List.of(NPE_FINDING));
@@ -87,7 +87,7 @@ class FindingFilterTest {
     void llmFailureDegradationIncludesLastError() {
         MemoryRecallPort recall = (project, query, topK, minScore) ->
                 List.of(new RecalledMemory("某条记忆", 0.5));
-        LlmClient llm = (sys, user) -> {
+        LlmClient llm = (sys, user, callSite) -> {
             throw new com.codemind.review.domain.agent.LlmException("中转端点 429 限流");
         };
         var filter = new FindingFilter(recall, llm, 0);
@@ -105,7 +105,7 @@ class FindingFilterTest {
         MemoryRecallPort recall = (project, query, topK, minScore) -> {
             throw new MemoryRecallException("memory 不可达", null);
         };
-        LlmClient llm = (sys, user) -> {
+        LlmClient llm = (sys, user, callSite) -> {
             throw new AssertionError("召回已失败，不该调用 LLM");
         };
         var filter = new FindingFilter(recall, llm, 1);
@@ -124,7 +124,7 @@ class FindingFilterTest {
         MemoryRecallPort recall = (project, query, topK, minScore) -> query.startsWith("PERFORMANCE")
                 ? List.of(new RecalledMemory("本项目允许在单线程访问场景下使用普通 HashMap", 0.6))
                 : List.of(new RecalledMemory("本项目不要求对内部来源的 sku 做 null/empty 校验", 0.8));
-        LlmClient llm = (sys, user) -> user.contains("单线程访问场景下使用普通 HashMap")
+        LlmClient llm = (sys, user, callSite) -> user.contains("单线程访问场景下使用普通 HashMap")
                 ? "{\"filtered\": true}"
                 : "{\"filtered\": false}";
         var filter = new FindingFilter(recall, llm, 0);

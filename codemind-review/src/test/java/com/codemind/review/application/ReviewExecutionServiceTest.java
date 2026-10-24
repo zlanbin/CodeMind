@@ -197,7 +197,7 @@ class ReviewExecutionServiceTest {
         scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
         FindingFilter filterAll = new FindingFilter(
                 (project, query, topK, minScore) -> List.of(new RecalledMemory("某条否决规则", 0.8)),
-                (sys, user) -> "{\"filtered\": true}", 0);
+                (sys, user, callSite) -> "{\"filtered\": true}", 0);
 
         service(filterAll, new OneFindingLlmClient()).executeReview(task.taskId());
 
@@ -214,7 +214,7 @@ class ReviewExecutionServiceTest {
                 (project, query, topK, minScore) -> {
                     throw new MemoryRecallException("memory 不可达", null);
                 },
-                (sys, user) -> { throw new AssertionError("召回已失败，不该调用 LLM"); }, 0);
+                (sys, user, callSite) -> { throw new AssertionError("召回已失败，不该调用 LLM"); }, 0);
 
         service(degradingFilter, new OneFindingLlmClient()).executeReview(task.taskId());
 
@@ -317,7 +317,7 @@ class ReviewExecutionServiceTest {
         // 证明 A 是被第一道（否决记忆）拦住的，不是靠第二道（已发布指纹）
         FindingFilter filtersCorrectnessOnly = new FindingFilter(
                 (project, query, topK, minScore) -> List.of(new RecalledMemory("某条否决规则", 0.8)),
-                (sys, user) -> user.contains("CORRECTNESS") ? "{\"filtered\": true}" : "{\"filtered\": false}", 0);
+                (sys, user, callSite) -> user.contains("CORRECTNESS") ? "{\"filtered\": true}" : "{\"filtered\": false}", 0);
         taskFingerprints.published = Set.of();
 
         service(filtersCorrectnessOnly, new TwoFindingLlmClient()).executeReview(task.taskId());
@@ -374,7 +374,8 @@ class ReviewExecutionServiceTest {
             agents.put(dim, new ReviewAgent(dim, llm, findingParser, summaryParser, 0));
         }
         DagScheduler scheduler =
-                new DagScheduler(new InMemoryNodeRunRepository(), Duration.ofSeconds(20), 0);
+                new DagScheduler(new InMemoryNodeRunRepository(),
+                        (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(20), 0);
         DagOrchestrator orchestrator = new DagOrchestrator(scheduler, agents,
                 new GlobalReduceAgent(llm, findingParser, 0), tasks);
         return new ReviewExecutionService(scm, tasks, orchestrator,
@@ -397,7 +398,7 @@ class ReviewExecutionServiceTest {
     /** 不召回任何候选，等价于「过滤器不生效」，让既有用例的断言不受影响。 */
     private static FindingFilter passThroughFindingFilter() {
         return new FindingFilter((project, query, topK, minScore) -> List.of(),
-                (sys, user) -> "{\"filtered\": false}", 0);
+                (sys, user, callSite) -> "{\"filtered\": false}", 0);
     }
 
     private ReviewTask insertedTask() {
@@ -588,7 +589,7 @@ class ReviewExecutionServiceTest {
     /** 最简桩：所有 LLM 调用都返回空 findings / 合法摘要，让链路能跑完。 */
     private static final class ScriptedLlmClient implements LlmClient {
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             if (userPrompt.contains("【各切片摘要】")) {
                 return "{\"findings\": []}";
             }
@@ -617,7 +618,7 @@ class ReviewExecutionServiceTest {
         private boolean findingEmitted = false;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             if (userPrompt.contains("【各切片摘要】")) {
                 return "{\"findings\": []}";
             }
@@ -652,7 +653,7 @@ class ReviewExecutionServiceTest {
         private boolean findingEmitted = false;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             if (userPrompt.contains("【各切片摘要】")) {
                 return "{\"findings\": []}";
             }

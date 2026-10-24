@@ -112,7 +112,7 @@ public final class ReviewAgent {
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             attempts++;
             try {
-                String raw = llmClient.complete(systemPrompt, userPrompt);
+                String raw = llmClient.complete(systemPrompt, userPrompt, dimension.name());
                 List<Finding> findings = parser.parse(raw);
                 ChunkSummary summary = parseSummary(raw, chunk.chunkId());
                 log.info("[{}] chunk {} 评审完成，{} 条意见，摘要{}（尝试 {}/{}）",
