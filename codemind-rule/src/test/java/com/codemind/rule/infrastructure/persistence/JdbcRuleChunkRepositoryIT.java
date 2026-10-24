@@ -101,4 +101,23 @@ class JdbcRuleChunkRepositoryIT {
             jdbc.sql("delete from rule.document where project = :p").param("p", otherProject).update();
         }
     }
+
+    @Test
+    void candidatesFromArchivedDocumentAreExcluded() {
+        // 版本替换只改 rule.document.status，chunk 本身没有 status 列——chunk 跟着文档的
+        // ACTIVE/ARCHIVED 走，查询必须 join document 过滤，否则旧版本内容会和新版本一起被召回
+        RuleDocument oldDoc = documentRepository.insert(project, "文档", 1, T0);
+        RuleChunk oldChunk = new RuleChunk(0, oldDoc.id(), project, "p", "h", "旧版本内容");
+        chunkRepository.insertAll(oldDoc.id(), project, List.of(oldChunk), List.of(embedder.embed(oldChunk.content())));
+        documentRepository.archiveActiveByProjectAndTitle(project, "文档");
+
+        RuleDocument newDoc = documentRepository.insert(project, "文档", 2, T0);
+        RuleChunk newChunk = new RuleChunk(0, newDoc.id(), project, "p", "h", "新版本内容");
+        chunkRepository.insertAll(newDoc.id(), project, List.of(newChunk), List.of(embedder.embed(newChunk.content())));
+
+        String query = "版本内容";
+        List<RuleChunkCandidate> candidates = chunkRepository.findCandidates(project, query, embedder.embed(query), 50);
+
+        assertThat(candidates).extracting(c -> c.chunk().content()).containsExactly("新版本内容");
+    }
 }

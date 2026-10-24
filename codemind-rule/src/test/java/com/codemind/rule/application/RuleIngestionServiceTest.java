@@ -34,17 +34,19 @@ class RuleIngestionServiceTest {
 
     @Test
     void firstUploadCreatesActiveDocumentWithVersionOne() {
-        RuleDocument doc = service.upload("proj", "接口设计规范", "# 标题\n正文内容。");
+        RuleIngestionService.UploadOutcome outcome = service.upload("proj", "接口设计规范", "# 标题\n正文内容。");
+        RuleDocument doc = outcome.document();
 
         assertThat(doc.status()).isEqualTo(RuleDocumentStatus.ACTIVE);
         assertThat(doc.version()).isEqualTo(1);
+        assertThat(outcome.chunkCount()).isEqualTo(1);
         assertThat(chunkRepository.chunksByDocument.get(doc.id())).hasSize(1);
     }
 
     @Test
     void reuploadingSameProjectAndTitleArchivesOldAndIncrementsVersion() {
-        RuleDocument first = service.upload("proj", "接口设计规范", "# 标题\n第一版内容。");
-        RuleDocument second = service.upload("proj", "接口设计规范", "# 标题\n第二版内容。");
+        RuleDocument first = service.upload("proj", "接口设计规范", "# 标题\n第一版内容。").document();
+        RuleDocument second = service.upload("proj", "接口设计规范", "# 标题\n第二版内容。").document();
 
         assertThat(documentRepository.findStatus(first.id())).isEqualTo(RuleDocumentStatus.ARCHIVED);
         assertThat(second.status()).isEqualTo(RuleDocumentStatus.ACTIVE);
@@ -53,7 +55,9 @@ class RuleIngestionServiceTest {
 
     @Test
     void uploadWithNoHeadingProducesZeroChunksWithoutError() {
-        RuleDocument doc = service.upload("proj", "空文档", "没有标题的正文。");
+        RuleIngestionService.UploadOutcome outcome = service.upload("proj", "空文档", "没有标题的正文。");
+        RuleDocument doc = outcome.document();
+        assertThat(outcome.chunkCount()).isZero();
 
         assertThat(chunkRepository.chunksByDocument.getOrDefault(doc.id(), List.of())).isEmpty();
     }

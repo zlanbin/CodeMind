@@ -42,17 +42,19 @@ public class JdbcRuleChunkRepository implements RuleChunkRepository {
     public List<RuleChunkCandidate> findCandidates(String project, String queryText, float[] queryEmbedding,
                                                     int limit) {
         // 两路各自排序取 limit，再 union 去重后统一算单一 similarity（max），同 memory M8 结论：
-        // 两路都是按 project 过滤后的精确扫描，不建近似索引（HNSW/GIN 带过滤会拿不满 limit）
+        // 两路都是按 project 过滤后的精确扫描，不建近似索引（HNSW/GIN 带过滤会拿不满 limit）。
+        // rule.chunk 本身没有 status 列——版本替换只改 rule.document.status，chunk 跟着文档走，
+        // 所以两个子查询都要 join document 并过滤 ACTIVE，否则 ARCHIVED 文档的旧 chunk 会占掉 limit 名额
         return jdbc.sql("""
                 with q as (select cast(:embedding as public.vector) as v),
                 hits as (
-                    (select c.id from rule.chunk c, q
-                     where c.project = :project
+                    (select c.id from rule.chunk c join rule.document d on d.id = c.document_id, q
+                     where c.project = :project and d.status = 'ACTIVE'
                      order by c.embedding operator(public.<=>) q.v
                      limit :limit)
                     union
-                    (select c.id from rule.chunk c
-                     where c.project = :project
+                    (select c.id from rule.chunk c join rule.document d on d.id = c.document_id
+                     where c.project = :project and d.status = 'ACTIVE'
                        and public.similarity(c.content, :query) > 0
                      order by public.similarity(c.content, :query) desc
                      limit :limit)

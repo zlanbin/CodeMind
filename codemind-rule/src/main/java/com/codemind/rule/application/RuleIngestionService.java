@@ -39,7 +39,7 @@ public class RuleIngestionService {
         this.clock = clock;
     }
 
-    public RuleDocument upload(String project, String title, String content) {
+    public UploadOutcome upload(String project, String title, String content) {
         requireNonBlank(project, "project", MAX_PROJECT_LENGTH);
         requireNonBlank(title, "title", MAX_TITLE_LENGTH);
         if (content == null) {
@@ -65,7 +65,7 @@ public class RuleIngestionService {
 
         log.info("规范文档上传 project={} title={} version={} chunks={}",
                 project, title, newVersion, chunks.size());
-        return document;
+        return new UploadOutcome(document, chunks.size());
     }
 
     private static void requireNonBlank(String value, String name, int maxLength) {
@@ -75,5 +75,8 @@ public class RuleIngestionService {
         if (value.length() > maxLength) {
             throw new IllegalArgumentException(name + " 不能超过 " + maxLength + " 字符");
         }
+    }
+
+    public record UploadOutcome(RuleDocument document, int chunkCount) {
     }
 }
