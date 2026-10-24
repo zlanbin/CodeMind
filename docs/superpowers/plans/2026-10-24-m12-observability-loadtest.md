@@ -16,7 +16,7 @@
 - 密钥只通过环境变量注入，不写入仓库——本计划不涉及新密钥
 - 测试命令 `mvn verify`，运行前必须 `cd deploy && docker compose up -d`
 - 测试分两类：`*Test`（surefire，纯逻辑）、`*IT`（failsafe，依赖真实中间件）
-- Token 成本标签 `call_site` 固定 6 个值：`STYLE`/`SECURITY`/`PERFORMANCE`/`TEST`/`CHANGE_MAP`/`GLOBAL_REDUCE`（来自 spec 1.1，不得用动态字符串，防止 Prometheus 标签基数爆炸）
+- Token 成本标签 `call_site` 固定 7 个值：`STYLE`/`SECURITY`/`PERFORMANCE`/`TEST`/`CHANGE_MAP`/`GLOBAL_REDUCE`/`FINDING_FILTER`（来自 spec 1.1 的 6 个 + Task 1 实现中发现的第 7 个调用方，见下方 Ruling，不得用动态字符串，防止 Prometheus 标签基数爆炸）
 - 节点耗时标签 `node_type` 固定 6 个值：`REVIEW_CHUNK`/`BUILD_CHANGE_MAP`/`CHUNK_REDUCE`/`GLOBAL_REDUCE`/`RECALL_RULES`/`PLAN_CHUNKS`（来自 spec 1.2，同样禁止用 `node.id()` 做标签）
 - `StubLlmClient` 与 `SpringAiLlmClient` 必须用 `@Profile` 互斥（`loadtest` vs `!loadtest`），不能同时存在导致 bean 装配歧义
 
@@ -27,6 +27,22 @@
 - 压测工具并发创建的 webhook 若 `(repo, pr_number, head_sha)` 重复：命中 M1 幂等唯一索引，任务数会比预期少且压测工具会一直轮询一个不存在或别人的任务——遗漏会让压测报告的任务数与实际发出的请求数不一致
 - `loadtest` profile 启动失败或 `StubLlmClient` 未真正替换 `SpringAiLlmClient`：压测会悄悄打到真实 LLM 中转端点，产生意外费用且结果被网络延迟污染——需要一个独立验证步骤确认生效的是哪个 bean
 - Grafana 容器首次启动 provisioning 目录为空或 JSON 格式错误：dashboard 不出现但容器本身正常启动（不会报错阻塞 `docker compose up`），容易被误判为"已完成"——需要显式打开 Grafana UI 核实面板真的渲染出数据
+
+## Ruling（Task 1 执行中发现的计划缺陷）
+
+Task 1 实现者核对全部 `implements LlmClient` 消费方时发现 `domain/finding/FindingFilter.java:105`
+（M9b Dedup & Filter 的否决判定调用）是第 4 个生产调用方，spec 1.1 与本计划原 Global Constraints
+都漏列了它（spec 只列了 `ReviewAgent`/`ChangeMapAgent`/`GlobalReduceAgent` 三个类）。
+
+**Ruling：`FindingFilter` 的判定调用计入 Token 成本指标，`callSite` 值定为 `"FINDING_FILTER"`。**
+理由：它和其余三者一样是真实消耗 LLM token 的生产路径（每条 Finding 最多一次判定 + 重试），
+排除在外会让 Token 成本指标系统性漏记一部分真实开销，违背 spec 的「Token 成本」采集目标本身。
+风险：如果这次裁决错了（比如用户本意是只追踪「评审类」调用、不含「过滤类」调用），代价是
+Grafana 面板上多出一个 `call_site=FINDING_FILTER` 系列，清理成本很低（去掉这个 tag 值、
+在 `FindingFilter.java` 里把 `complete()` 调用换成不打点的路径），不影响其他 6 个值的既有实现。
+
+已更新上方 Global Constraints 第一条为 7 个值。Task 1 已用这个值提交（见 Task 1 ledger 条目）。
+Task 2（`SpringAiLlmClient` 打点实现）、Task 4（Grafana dashboard）按 7 个值而非 6 个值执行。
 
 ---
 

@@ -5,22 +5,68 @@
 
 ## 当前状态
 
-- 当前里程碑：**M11 已完成**（rule-service 规范文档 RAG，ROADMAP M11 验证点「上传规范文档后，
-  评审意见能引用对应条款」在真实 LLM + 生产 DAG 链路上端到端验证通过）。M8/M9a/M9b/M10 均已合并进
-  `master`
+- 当前里程碑：**M12 已完成**（可观测与压测，ROADMAP M12 验证点「Grafana 可见指标，压测报告存入
+  `docs/reports/`」两项均已达成：Token 成本指标按 call_site 分组、DAG 节点耗时指标按 node_type
+  分组，均在 Grafana 后端 API 查询层面坐实非空数据；真实压测报告存入
+  `docs/reports/M12-loadtest.md`）。M8/M9a/M9b/M10/M11 均已合并进 `master` 并推送到
+  `origin/master`（`1731c4d`）
 - 上次更新：2026-10-24
-- 分支：`feat/m11-rule-upload`（基于 master `46f44ec`），16 个实现 commit（T1~T16）+ 3 个 Final Review
-  修复 commit（`ac5252a`/`38413d0`/`7446baa`）
+- 分支：`feat/m12-observability-loadtest`（基于 master `12ce9a7`），12 个 commit（T1~T6 实现
+  + 1 个 T1 裁决收尾 + 1 个 T5 裁决修复 + 3 个 Final Review 修复 commit），`subagent-driven-development`
+  执行，每个任务独立审查 + 整条分支最终审查（opus）+ 一轮 fix + 一轮 scoped re-review，全部 clean。
+  尚未合并进 master（等待下一步：会话内已选择「本地合并」，见下）
 - 阻塞项：无
-- 未验证项：无。rule-service 全量 `mvn verify` 40/40 pass 0 skipped；review-service 全量
-  `mvn verify` 287 tests，1 error + 1 skipped 均为既有真实外部服务 IT（integration-service /
-  memory-service 本次未启动），与 M11 无关，非本次改动引入。真实 LLM 验收 `RuleRecallAndCiteIT`
-  走生产 `DagOrchestrator.executeCrossSessionReview` 链路实跑通过（见下）
+- 未验证项：无。review-service 全量 `mvn test` 237 tests 0 failures/errors/skipped（无回归）。
+  真实压测 `LoadTestRunner`（10 并发 × 30 任务）跑了 4 轮，全部 30/30 成功 0 失败 0 超时；
+  Grafana 两个面板（Token 用量、节点耗时 P95）经 Grafana 后端 API 实测确认非空非 NaN 数据
 
 ## 下一个会话要做的事
 
-提交并推送 `feat/m11-rule-upload` 分支，开 PR 合并进 `master`。合并后下一个里程碑是 **M12
-可观测与压测**（见 `docs/ROADMAP.md`）。
+M12 合并完成后，下一个里程碑是 **M13 文档、演示脚本、README 指标**（见 `docs/ROADMAP.md`），
+验证点是「新环境按演示脚本从零跑通」。
+
+M12 可直接复用：
+- Token 成本埋点：`LlmClient.complete(systemPrompt, userPrompt, callSite)`，`callSite` 固定
+  7 个值（`STYLE`/`SECURITY`/`PERFORMANCE`/`TEST`/`CHANGE_MAP`/`GLOBAL_REDUCE`/
+  `FINDING_FILTER`——第 7 个是本里程碑执行中发现 `FindingFilter`（M9b）也是生产调用方，
+  spec 原文漏列）。`SpringAiLlmClient` 读真实 `ChatResponse.getMetadata().getUsage()` 打点
+  `codemind_llm_tokens_total`（tag `call_site`/`type`），usage 缺失按 0 记录 + 单次 warn，
+  不抛异常
+- 节点耗时埋点：`Node` 接口加 `nodeType()`（6 个固定值：`REVIEW_CHUNK`/`BUILD_CHANGE_MAP`/
+  `CHUNK_REDUCE`/`GLOBAL_REDUCE`/`RECALL_RULES`/`PLAN_CHUNKS`），domain 新端口
+  `MetricsRecorder`（`DagScheduler` 注入，成功/每次重试失败都各记一次），infrastructure
+  `MicrometerMetricsRecorder` 用 `Timer.builder(...).publishPercentileHistogram().register(...)`
+  （**不能用 `meterRegistry.timer(...)` 便捷方法**，那样不会发布 `_bucket` 系列，Grafana 的
+  `histogram_quantile` 查询会永远返回 NaN——本里程碑真的踩过这个坑，Task 3/4 两次审查都没
+  交叉核实到，被最终整体审查抓到）
+- Prometheus + Grafana：`deploy/docker-compose.yml` 已接入两个容器，6 个服务都暴露
+  `/actuator/prometheus`。Grafana provisioning 的 dashboard JSON 里 `datasource.uid`
+  **不能写数据源名字的字面量**（如 `"Prometheus"`），后端 API 查询会 404（前端 UI 有
+  by-name 回退能跑，但告警/快照等后端路径不会）；要写真实 uid（本机当前是
+  `PBFA97CFB590B2093`，由 provisioning 的 datasource 名字推导出来，建议下次在
+  `deploy/init/grafana/provisioning/datasources/prometheus.yml` 里显式钉 `uid` 字段，
+  不要依赖隐式推导）
+- 压测基础设施：`loadtest` Spring profile + `StubLlmClient`（`@Profile("loadtest")` 与
+  `SpringAiLlmClient` 的 `@Profile("!loadtest")` 互斥），2~8 秒随机延迟模拟真实 LLM 调用，
+  **压测替身只能挡住 LLM 调用，挡不住 review 经 integration 回头拉真实 GitHub diff 这条路径**
+  （`loadtest` profile 没有替身 SCM 内容拉取），压测必须用真实存在的只读仓库/PR（本机用的是
+  `zlanbin/codemind-sandbox` PR #1，环境变量 `CODEMIND_TEST_REPO`/`CODEMIND_TEST_PR`）
+- `LoadTestRunner`（`codemind-review/src/test/java/.../loadtest/`，手动运行工具不参与
+  `mvn verify`）：并发压测、HMAC 签名、PG 轮询用的是**真实 `updated_at` 列**而不是
+  `Instant.now()`——**并发压测工具如果串行轮询多个任务，用 `Instant.now()` 记录"查到终态的
+  时刻"会把延迟数据测成假象**（本里程碑真的踩过：第一轮报告显示 P50~P99 只差 0.1 秒，像是
+  系统完全没有排队，实际是测量方法的伪影，真实离散度是 2~3 秒量级）。下次写类似压测工具
+  直接用数据库时间戳，不要用发起查询时的本地时钟
+- Grafana 查询验证的时机坑：`rate(...[5m])` 这类滑动窗口查询，如果等太久再去验证（比如压测
+  跑完等 5~6 分钟才查），流量会滑出窗口导致查询返回 NaN，容易误判成"配置错误"——验证要在
+  流量窗口内完成，或者持续补一点流量进去再查
+- 遗留：仓库里有两个未跟踪文件 `docs/workflow-architecture-分享版.html`、
+  `docs/workflow-architecture-进化版.html`，与现有里程碑都无关，未处理，下次看到可以确认是否
+  需要清理或归档
+
+遗留：仓库里有两个未跟踪文件 `docs/workflow-architecture-分享版.html`、
+`docs/workflow-architecture-进化版.html`，与 M11 及现有里程碑无关，未处理，下次看到可以确认是否
+需要清理或归档。
 
 M10 做完了什么（ROADMAP M10 验证点：第二次 push 只评审新 diff，不重复发评论）：
 - `ScmClient`/`ScmContentPort` 加 `fetchCompareDiff(repo, oldHead, newHead) -> CompareResult`，
@@ -156,6 +202,77 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M12 可观测与压测 —— 完成于 2026-10-24
+
+无独立设计输入文档，ARCHITECTURE.md 技术栈表已点名选型（`Micrometer + Prometheus + Grafana`：
+Token 成本、节点耗时），本会话头脑风暴定设计共识，写成 spec
+`docs/superpowers/specs/2026-10-24-m12-observability-loadtest-design.md`，按 `writing-plans`
+落成 `docs/plans/2026-10-24-m12-observability-loadtest.md`（T1~T6，链式依赖）。6 个任务全部
+`subagent-driven-development` 执行（独立任务 ≥3 个），每个任务独立审查，完成后整条分支最终审查
+（opus，跨任务一致性检查）。隔离开发用 `using-git-worktrees`
+（`.worktrees/feat-m12-observability-loadtest`，分支 `feat/m12-observability-loadtest`）。
+
+改动范围（review-service + 6 服务配置 + deploy）：
+
+- T1：`LlmClient.complete()` 接口签名加 `callSite` 参数，三处 spec 原文点名的调用方
+  （`ReviewAgent`/`ChangeMapAgent`/`GlobalReduceAgent`）传入固定字面量。执行中发现第 4 处
+  生产调用方 `FindingFilter.java`（M9b 否决判定）被 spec 漏列，裁决计入 Token 成本指标，
+  `callSite` 固定值从 6 个扩展到 7 个（补 `FINDING_FILTER`）
+- T2：`SpringAiLlmClient` 改用 `.call().chatResponse()` 读取真实 `ChatResponse.getMetadata().getUsage()`，
+  按 `promptTokens`/`completionTokens` 打点 `codemind_llm_tokens_total`（tag `call_site`/`type`），
+  usage 缺失按 0 记录 + 单次 `log.warn`，不抛异常不中断调用链
+- T3：`Node` 接口加 `nodeType()` 默认方法（6 个具体实现类覆写固定常量：`REVIEW_CHUNK`/
+  `BUILD_CHANGE_MAP`/`CHUNK_REDUCE`/`GLOBAL_REDUCE`/`RECALL_RULES`/`PLAN_CHUNKS`），domain
+  新增端口 `MetricsRecorder`，`DagScheduler` 注入并在成功/每次重试失败时都打点（不只是最终
+  失败才记），infrastructure `MicrometerMetricsRecorder` 实现打点 `codemind_dag_node_duration`
+- T4：`deploy/docker-compose.yml` 接入 Prometheus + Grafana 两个容器，6 个服务（gateway/
+  integration/review/memory/rule/admin）加 `micrometer-registry-prometheus` 依赖、暴露
+  `/actuator/prometheus`。Grafana provisioning 预置 dashboard（两个面板：Token 用量按
+  call_site、节点耗时 P95 按 node_type）
+- T5：新增 `loadtest` Spring profile，`StubLlmClient`（`@Profile("loadtest")`）与
+  `SpringAiLlmClient`（`@Profile("!loadtest")`）互斥，用 2~8 秒随机延迟 + 固定合法样例 JSON
+  模拟真实 LLM 调用。执行中发现 `FINDING_FILTER` 落 default 分支会导致 `FindingFilter` 在
+  压测时走降级路径（耗时数据失真），裁决加专门分支返回 `{"filtered": false}`
+- T6：`LoadTestRunner`（手动运行压测工具，不参与 `mvn verify`）+ 真实跑一轮 10 并发×30 任务
+  压测 + 压测报告 `docs/reports/M12-loadtest.md`。压测过程中发现两处环境约束（`loadtest`
+  profile 没有替身 SCM 内容拉取路径，需用真实只读仓库；integration-service 需要真实
+  `GITHUB_TOKEN` 避免匿名限流），均为必要修正记入报告
+- Final Review 修复：整条分支最终审查发现两处更早任务遗留的真实缺口（`StubLlmClient` 没打
+  Token 指标；`MicrometerMetricsRecorder` 用普通 Timer 没开 histogram，Grafana P95 面板永远
+  查不到数据）导致 ROADMAP 验证点未真正达成，裁决回 S5 补齐（不接受"压测本身跑通就算完成"）。
+  修复后发现 `LoadTestRunner` 串行轮询 + `Instant.now()` 记录"查询时刻"而非"真实完成时刻"的
+  方法论缺陷（延迟数据被测成假象），一并修复并重跑 4 轮压测验证。最后一轮 scoped re-review
+  又发现报告里一处 token 累计数字翻倍且自相矛盾，修正后全部 clean
+
+验证命令与结果（2026-10-24，真实中间件，review-service 跑 `loadtest` profile + integration-service
+跑默认 profile）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **Grafana 可见指标**（ROADMAP M12） | Grafana 后端 API 查询两个面板对应 PromQL | **通过**。Token 用量面板（`sum by (call_site) (codemind_llm_tokens_total)`）6 个 call_site 非空非 NaN；节点耗时 P95 面板（`histogram_quantile(0.95, sum by (le, node_type) (rate(codemind_dag_node_duration_seconds_bucket[5m])))`）6 个 node_type 非空非 NaN，与压测报告记录的数值在特定时间戳三位有效数字吻合（复审独立验证） |
+| **压测报告存入 `docs/reports/`**（ROADMAP M12） | `LoadTestRunner`（10 并发×30 任务） | **通过**。4 轮压测均 30/30 成功 0 失败 0 超时；修复后真实延迟 P50=33.3s/P95=36.0s/P99=36.7s（真实离散度 2~3 秒量级，修复前因测量方法缺陷显示的"P50到P99只差0.1秒"已纠正，原始记录保留未删改）；吞吐 48.83~70.32 任务/分钟（随压测轮次推进因本机资源持续承压下降，符合预期）；call_site 维度 token 分布 6 个值全覆盖 |
+| review-service 全仓回归 | `mvn test -pl codemind-review` | **通过**。237 测试 0 失败 0 错误 0 跳过，相对 M11 完成时的基线无回归 |
+
+S6 评审（6 个任务各自独立 general-purpose 子代理审查 + 1 次整条分支最终审查，opus，固定点
+`12ce9a7` 即 M11 完成点）：
+
+- 单任务审查：Task 1~6 均 Approved，0 Critical，少量 Minor（均已记入 deferred 或已修复）
+- 最终整体审查发现 2 项 Important（均已修复并经 scoped re-review 确认 ADDRESSED）+ 复审又
+  发现 1 项新 Important（报告数字错误，一行修正）：
+  1. `LoadTestRunner` 延迟测量方法论缺陷（串行轮询 + `Instant.now()` 导致数据失真）——改用
+     数据库 `updated_at` 列，RED（重算得到真实分布 P50=26.7s 对比报告写的 25.4s）→GREEN
+  2. 压测报告未跟上指标修复后的状态（仍写"未验证通过"与分支实际相反）——追加"修复后复测"
+     节，原始记录保留不删改
+  3.（复审新发现）报告里 token 累计数字翻倍且与同段话另一数字自相矛盾——一行纠正
+- 4 项跨任务一致性检查全部通过：7 个 callSite 值无遗漏无拼写偏差；两条指标名/tag 名在
+  生产代码/测试/dashboard 三方完全一致；domain 层（`LlmClient`/`Node`/`MetricsRecorder`/
+  `DagScheduler`）grep 确认零 Micrometer/Spring 依赖；bean 装配无歧义（`DagScheduler` 新参数
+  有 `Objects.requireNonNull` 守卫，不会出现 M11 踩过的"bean 在但构造参数是 null"陷阱）
+
+与 ARCHITECTURE.md 的偏差：**无需同步**（技术栈表 2 已列 Micrometer/Prometheus/Grafana「M12
+引入」，本次按此落地，设计本身未变；本里程碑不改 DAG 流程图、领域模型或服务边界，只加观测性
+埋点与基础设施）。
 
 ### M11 rule-service：规范文档 RAG —— 完成于 2026-10-24
 
@@ -1025,6 +1142,12 @@ java-diff-utils 作为「代码解析」候选，已不使用——留待下次�
 | 2026-10-23 | M9a | 反馈靠轮询 + 手动端点，不用 webhook | GitHub 无 reaction webhook，本机 8081 外网不可达（判定门确认） |
 | 2026-10-23 | M9a | 只学有写权限者的反馈，可配白名单 | 公开仓库外人 👎 可压掉真缺陷（S6 标准轴） |
 | 2026-10-23 | M9a | 同一人既回复又 👎 只学回复；合并评论只有 👎 不学；DELETE 只删 COMMON_DEFECT | T6 第一轮实测学反了且删掉了正确规则（用户确认修法） |
+| 2026-10-24 | M12 | `callSite` 固定值从 spec 原定的 6 个扩展到 7 个，补 `FINDING_FILTER` | T1 执行中发现 `FindingFilter.java`（M9b 否决判定）也是 `LlmClient` 的生产调用方，spec 原文漏列；它和其余 6 个一样真实消耗 token，排除会让指标系统性漏记 |
+| 2026-10-24 | M12 | `StubLlmClient` 给 `FINDING_FILTER` 加专门分支返回 `{"filtered": false}`，不落 default 分支 | 落 default 分支会导致 `FindingFilter` 在压测场景每次走"LLM 判定失败→放行"的降级路径，1 次调用就放行，比真实评审类调用耗时更短，会让压测测出的端到端延迟比真实生产场景偏低 |
+| 2026-10-24 | M12 | Grafana dashboard JSON 文件路径从 `deploy/init/grafana/dashboards/` 改到 `deploy/init/grafana/provisioning/dashboards/files/` | Grafana 11.3.1 镜像不允许在一个已经整体只读挂载的目录内部再挂第二个挂载点；挪进 provisioning 目录树本身可以只用一个 volume |
+| 2026-10-24 | M12 | brief/spec 要求的"浏览器打开核实面板渲染"用 Grafana REST API 查询等价替代 | Lightpanda（本项目浏览器联调规范指定的工具）没有图形渲染引擎，不能做视觉核实；API 查询 dashboard 结构 + 实跑 PromQL 确认查询链路通，是这个限制下能做到的最强验证 |
+| 2026-10-24 | M12 | 压测跑完后发现两处指标缺口（`StubLlmClient` 未打点、`MicrometerMetricsRecorder` 未开 histogram），裁决回 S5 补齐，不接受"压测本身跑通就算完成" | ROADMAP M12 的核心验证点是"Grafana 可见指标"，两处缺口导致该验证点实际未达成；比照 WORKFLOW.md 验证门"跳过的测试不算通过"的精神，指标可见性不是锦上添花 |
+| 2026-10-24 | M12 | `LoadTestRunner` 改用数据库 `updated_at` 列记录任务完成时刻，不用 `Instant.now()` | 串行轮询下用"查询时刻"记录完成时间，会让延迟数据退化成"真实完成时刻的滚动最大值"，几乎没有真实离散度，是测量方法的伪影不是系统真实表现（整条分支最终审查发现，实测重算证明差异达 5 秒量级） |
 
 ## 环境与常用命令
 
