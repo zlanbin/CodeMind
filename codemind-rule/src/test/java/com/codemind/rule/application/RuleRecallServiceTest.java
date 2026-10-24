@@ -27,6 +27,24 @@ class RuleRecallServiceTest {
     }
 
     @Test
+    void rejectsBlankOrNullProject() {
+        assertThatThrownBy(() -> service.recall("", "query", null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.recall(null, "query", null)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsProjectOverMaxLength() {
+        String tooLong = "p".repeat(256);
+        assertThatThrownBy(() -> service.recall(tooLong, "query", null)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsQueryOverMaxLength() {
+        String tooLong = "q".repeat(8001);
+        assertThatThrownBy(() -> service.recall("proj", tooLong, null)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void rejectsTopKAboveLimit() {
         assertThatThrownBy(() -> service.recall("proj", "query", 21)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> service.recall("proj", "query", 0)).isInstanceOf(IllegalArgumentException.class);
