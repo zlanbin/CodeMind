@@ -102,10 +102,10 @@ public final class FindingFilter {
         String lastError = "";
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                // TODO(M12 T1 遗留问题，待确认): brief/plan 只列了 3 处调用方
-                // (STYLE/SECURITY/PERFORMANCE/TEST/CHANGE_MAP/GLOBAL_REDUCE)，未覆盖这个 M9b
-                // 的 LLM 判定调用。"FINDING_FILTER" 是临时占位字面量，为了编译通过，不代表
-                // 已确认的指标 taxonomy 决策，需要用户/计划作者确认后再定。
+                // "FINDING_FILTER" 是 M12 可观测性指标 call_site 标签的正式值（第 4 个调用方，
+                // 补充 brief/plan 原列的 STYLE/SECURITY/PERFORMANCE/TEST/CHANGE_MAP/GLOBAL_REDUCE
+                // 6 个）。已由协调者裁决确认，详见
+                // docs/superpowers/plans/2026-10-24-m12-observability-loadtest.md 的 Ruling 记录。
                 String raw = llmClient.complete(SYSTEM_PROMPT, user, "FINDING_FILTER");
                 return parse(raw);
             } catch (LlmException | IllegalArgumentException e) {
