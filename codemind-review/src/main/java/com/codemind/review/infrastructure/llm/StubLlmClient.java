@@ -1,6 +1,7 @@
 package com.codemind.review.infrastructure.llm;
 
 import com.codemind.review.domain.agent.LlmClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
@@ -12,6 +13,11 @@ import java.util.concurrent.ThreadLocalRandom;
  * <p>不调用任何真实 LLM，用固定样例 JSON + 随机延迟模拟真实调用的耗时分布，隔离网络抖动对
  * 压测数据的干扰（见 spec 3.1）。与 {@link SpringAiLlmClient} 的 {@code @Profile("!loadtest")}
  * 互斥，保证 {@code loadtest} profile 下容器里只有这一个 {@link LlmClient} bean。
+ *
+ * <p>M12 压测裁决修复：没有真实 {@code ChatResponse} 可读 usage，但 Grafana 的 Token 面板要在
+ * {@code loadtest} profile 下也有数据，所以按固定假值打点（每次调用固定 500 prompt / 200
+ * completion token，非零即可，数值本身无意义）。指标名、tag 名与 {@link SpringAiLlmClient}
+ * 保持一致，Grafana 查询才能同时覆盖两种 profile。
  *
  * <p>callSite 分四类返回不同结构的样例 JSON：
  * <ul>
@@ -29,6 +35,16 @@ import java.util.concurrent.ThreadLocalRandom;
 @Component
 @Profile("loadtest")
 public class StubLlmClient implements LlmClient {
+
+    private static final String TOKENS_METRIC = "codemind_llm_tokens_total";
+    private static final int FAKE_PROMPT_TOKENS = 500;
+    private static final int FAKE_COMPLETION_TOKENS = 200;
+
+    private final MeterRegistry meterRegistry;
+
+    public StubLlmClient(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
 
     // STYLE/SECURITY/PERFORMANCE/TEST 共用的评审样例：findings + summary 均合法非空，
     // 避免压测时触发 ChunkSummaryJsonParser 的降级分支（summary.changedSymbols/intent 不能为空）。
@@ -92,12 +108,21 @@ public class StubLlmClient implements LlmClient {
     @Override
     public String complete(String systemPrompt, String userPrompt, String callSite) {
         sleepRandomly();
+        recordFakeTokenUsage(callSite);
         return switch (callSite) {
             case "CHANGE_MAP" -> SAMPLE_CHANGE_MAP_JSON;
             case "GLOBAL_REDUCE" -> SAMPLE_GLOBAL_REDUCE_FINDING_JSON;
             case "FINDING_FILTER" -> SAMPLE_FINDING_FILTER_JSON;
             default -> SAMPLE_FINDING_JSON; // STYLE/SECURITY/PERFORMANCE/TEST 共用一份评审样例
         };
+    }
+
+    /** 固定假值打点，让 {@code loadtest} profile 下 Token 成本面板也有数据（没有真实 usage 可读）。 */
+    private void recordFakeTokenUsage(String callSite) {
+        meterRegistry.counter(TOKENS_METRIC, "call_site", callSite, "type", "prompt")
+                .increment(FAKE_PROMPT_TOKENS);
+        meterRegistry.counter(TOKENS_METRIC, "call_site", callSite, "type", "completion")
+                .increment(FAKE_COMPLETION_TOKENS);
     }
 
     /** 确定性区间的随机延迟 [2000ms, 8000ms]，模拟真实 LLM 调用的耗时分布。 */
