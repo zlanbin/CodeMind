@@ -5,6 +5,7 @@ import com.codemind.review.domain.agent.FindingParseException;
 import com.codemind.review.domain.changemap.ChangeMapJsonParser;
 import com.codemind.review.domain.changemap.ChangeMapParseException;
 import com.codemind.review.domain.finding.Finding;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -15,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@link StubLlmClient} 单测（M12 loadtest profile）。
  *
- * <p>验证三类 callSite 返回的样例 JSON 能被对应解析器解析成功，以及确定性延迟落在 [2s, 8s] 区间内。
+ * <p>验证各类 callSite 返回的样例 JSON 能被对应解析器解析成功，以及确定性延迟落在 [2s, 8s] 区间内。
  */
 class StubLlmClientTest {
 
@@ -48,6 +49,16 @@ class StubLlmClientTest {
 
         List<Finding> findings = new FindingJsonParser(new ObjectMapper()).parse(raw);
         assertThat(findings).isNotNull().isNotEmpty();
+    }
+
+    @Test
+    void returnsFilteredFalseJsonForFindingFilterCallSite() throws Exception {
+        StubLlmClient client = new StubLlmClient();
+        String raw = client.complete("sys", "user", "FINDING_FILTER");
+
+        JsonNode node = new ObjectMapper().readTree(raw);
+        assertThat(node.has("filtered")).isTrue();
+        assertThat(node.get("filtered").asBoolean()).isFalse();
     }
 
     @Test

@@ -13,17 +13,17 @@ import java.util.concurrent.ThreadLocalRandom;
  * 压测数据的干扰（见 spec 3.1）。与 {@link SpringAiLlmClient} 的 {@code @Profile("!loadtest")}
  * 互斥，保证 {@code loadtest} profile 下容器里只有这一个 {@link LlmClient} bean。
  *
- * <p>callSite 分三类返回不同结构的样例 JSON：
+ * <p>callSite 分四类返回不同结构的样例 JSON：
  * <ul>
  *   <li>{@code CHANGE_MAP}：{@link com.codemind.review.domain.changemap.ChangeMapJsonParser} 期望的结构；</li>
  *   <li>{@code GLOBAL_REDUCE}：{@link com.codemind.review.domain.agent.GlobalReduceAgent} 复用
  *       {@link com.codemind.review.domain.agent.FindingJsonParser}，结构与评审类相同；</li>
+ *   <li>{@code FINDING_FILTER}：{@link com.codemind.review.domain.finding.FindingFilter} 期望的是
+ *       {@code {"filtered": true|false}} 这种极简结构，返回固定的 {@code {"filtered": false}}（始终
+ *       放行，但走的是正常解析成功路径，而不是解析失败的降级路径），保证压测测出的端到端延迟符合
+ *       真实场景下"调用 LLM 判定"的耗时特征；</li>
  *   <li>其余（{@code STYLE}/{@code SECURITY}/{@code PERFORMANCE}/{@code TEST}，以及任何未预期的新
- *       callSite，含 {@code FINDING_FILTER}）：落到 default 分支，返回评审类样例。
- *       {@code FINDING_FILTER}（{@link com.codemind.review.domain.finding.FindingFilter}）期望的是
- *       {@code {"filtered": true|false}} 这种极简结构，和这里的评审 JSON 不兼容，会导致该场景下
- *       每次都走 LLM 判定失败 -&gt; 放行的降级路径。这是否要在 stub 里单独支持是一个设计决策，
- *       未在本任务范围内处理，已在任务报告里向用户提出，待确认。</li>
+ *       callSite）：落到 default 分支，返回评审类样例。</li>
  * </ul>
  */
 @Component
@@ -84,12 +84,18 @@ public class StubLlmClient implements LlmClient {
             }
             """;
 
+    // FindingFilter 期望的极简结构，始终放行，但走正常解析成功路径（不是解析失败降级路径）。
+    private static final String SAMPLE_FINDING_FILTER_JSON = """
+            {"filtered": false}
+            """;
+
     @Override
     public String complete(String systemPrompt, String userPrompt, String callSite) {
         sleepRandomly();
         return switch (callSite) {
             case "CHANGE_MAP" -> SAMPLE_CHANGE_MAP_JSON;
             case "GLOBAL_REDUCE" -> SAMPLE_GLOBAL_REDUCE_FINDING_JSON;
+            case "FINDING_FILTER" -> SAMPLE_FINDING_FILTER_JSON;
             default -> SAMPLE_FINDING_JSON; // STYLE/SECURITY/PERFORMANCE/TEST 共用一份评审样例
         };
     }
