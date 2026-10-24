@@ -160,7 +160,7 @@ P50 到 P99 相差 3.4s，min 到 max 相差 6.9s——**这才是修复测量�
 
 （上表为累计第 1、2 轮复测后的快照；固定假值 prompt=500/completion=200 每次调用，6 个 call_site
 各 60 次调用，与两轮共 60 个压测任务吻合。后续又跑了第 3、4 轮，累计到复测结束时六个 call_site
-各自 prompt=120000/completion=48000（经 Grafana API 核实为 `sum`=84000/call_site，即
+各自 prompt=60000/completion=24000（经 Grafana API 核实为 `sum`=84000/call_site，即
 120×700），与总调用量一致。）`FINDING_FILTER` 这第 7 个 call_site 本次复测期间未产生数据——
 符合预期，它只在 `FindingFilter` 判定发现相似重复 finding 时才会触发调用，不是每次评审都会走到，
 不属于 spec 3.3 要求的覆盖范围缺口。
