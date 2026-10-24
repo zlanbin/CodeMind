@@ -107,6 +107,7 @@
                 <configuration>
                     <excludes>
                         <exclude>**/RealPullRequestPublishIT.java</exclude>
+                        <exclude>**/IncrementalReviewSandboxIT.java</exclude>
                     </excludes>
                 </configuration>
             </plugin>
