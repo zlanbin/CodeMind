@@ -5,21 +5,22 @@
 
 ## 当前状态
 
-- 当前里程碑：**M10 已完成**（增量评审，ROADMAP M10 验证点「第二次 push 只评审新 diff，不重复发评论」
-  在真实 sandbox PR 上端到端验证通过）。M8/M9a/M9b 均已合并进 `master`
+- 当前里程碑：**M11 已完成**（rule-service 规范文档 RAG，ROADMAP M11 验证点「上传规范文档后，
+  评审意见能引用对应条款」在真实 LLM + 生产 DAG 链路上端到端验证通过）。M8/M9a/M9b/M10 均已合并进
+  `master`
 - 上次更新：2026-10-24
-- 分支：`feat/m10-incremental-review`（基于 master `d58aba4`），8 个实现 commit + 1 个 Final Review 修复
-  commit（`10b8ce9`，已推送）。本次新增的验收 IT（`IncrementalReviewSandboxIT`）和 pom 排除规则**还未提交**，
-  待本会话 S8 收尾后随 commit 一起推送
+- 分支：`feat/m11-rule-upload`（基于 master `46f44ec`），16 个实现 commit（T1~T16）+ 3 个 Final Review
+  修复 commit（`ac5252a`/`38413d0`/`7446baa`）
 - 阻塞项：无
-- 未验证项：无。全量 `mvn verify`（真实中间件 + 真实 LLM/GitHub key）0 skipped/0 errors；Task 8 真实
-  sandbox PR 端到端验收通过（见下）
+- 未验证项：无。rule-service 全量 `mvn verify` 40/40 pass 0 skipped；review-service 全量
+  `mvn verify` 287 tests，1 error + 1 skipped 均为既有真实外部服务 IT（integration-service /
+  memory-service 本次未启动），与 M11 无关，非本次改动引入。真实 LLM 验收 `RuleRecallAndCiteIT`
+  走生产 `DagOrchestrator.executeCrossSessionReview` 链路实跑通过（见下）
 
 ## 下一个会话要做的事
 
-**先收尾提交**：本会话新增的 `IncrementalReviewSandboxIT` + pom 排除规则还未提交，提交后把
-`feat/m10-incremental-review` 推送、开 PR 合并进 `master`。合并后下一个里程碑是 **M11 rule-service：
-规范文档 RAG**（见 `docs/ROADMAP.md`）。
+提交并推送 `feat/m11-rule-upload` 分支，开 PR 合并进 `master`。合并后下一个里程碑是 **M12
+可观测与压测**（见 `docs/ROADMAP.md`）。
 
 M10 做完了什么（ROADMAP M10 验证点：第二次 push 只评审新 diff，不重复发评论）：
 - `ScmClient`/`ScmContentPort` 加 `fetchCompareDiff(repo, oldHead, newHead) -> CompareResult`，
@@ -39,6 +40,31 @@ M10 做完了什么（ROADMAP M10 验证点：第二次 push 只评审新 diff�
 - 验收用的 IT 固定在 `codemind-review/src/test/java/.../application/IncrementalReviewSandboxIT.java`，
   跟 `RealPullRequestPublishIT` 一样走 `-Pgithub-write` profile、prepare/publish 分阶段人工确认，
   不在日常 `mvn verify` 里跑
+
+M11 可直接复用：
+- rule-service 的上传/召回入口：`POST /internal/rules/documents {project,title,content}` →
+  `Result<UploadDocumentResponse>`（含 chunk 数）；`POST /internal/rules/recall {project,query,topK?}` →
+  `Result<RecallResponse>`（每条带 `documentTitle/sectionPath/heading/content/similarity`）
+- 版本替换：同 `project+title` 重新上传时，`RuleIngestionService.upload`（`@Transactional`）先把旧
+  ACTIVE 文档转 ARCHIVED 再插入新文档+新切块；`rule.chunk` 本身没有 status 列，切块跟着所属文档的
+  ACTIVE/ARCHIVED 走，召回 SQL 必须 join `rule.document` 过滤 ACTIVE（M11 T8 真实踩过：漏 join 会让
+  旧版本内容和新版本一起被召回）
+- review 侧接入：`RuleRecallPort`（domain 出站端口）→ `FeignRuleRecallAdapter`（经 Feign 调
+  `codemind-rule`，`Result` 信封同 M9b 教训）→ `RecallRulesNode`（DAG 节点，按 chunk 粒度调用一次，
+  4 个评审维度共享结果，不重复召回）→ `ReviewChunkNode`（新增 `recallRulesNodeId` 可选字段，从
+  `context.completedResults()` 取上游结果）→ `ReviewAgent.review(chunk, changeMap, rules)`（新重载，
+  `rules` 非空时 prompt 追加「团队规范条款」区块，要求引用形式为 `《文档标题》sectionPath`）
+- `DagOrchestrator` 新增 `RuleRecallPort` 构造参数走向后兼容路线：保留 2 参/4 参构造器（转调
+  `rulePort=null`），新增 5 参构造器；`rulePort` 与 `project`（来自 `task.repo()`）都非 null 时才建
+  `RecallRulesNode`。**生产装配必须显式把这个参数传进 `DagOrchestrator` 的 `@Bean` 方法**——只把
+  `RuleRecallPort` 注册成独立 bean 不会自动接上，Final Review 真的踩过这个坑（bean 存在但
+  `DagOrchestrator.rulePort` 字段仍是 null，`RecallRulesNode` 永不创建，功能形同摆设），
+  靠反射断言 `dagOrchestratorIsWiredWithRuleRecallPort` 才抓到
+- 验收 IT 要证明「验证点在生产链路上端到端跑通」，不能在最后一步手工把召回结果塞给 Agent——
+  即使前两步（上传、召回）各自验证过也不够，必须走完整 `DagOrchestrator.executeCrossSessionReview`
+  （ChangeMap/切片阶段可用确定性 stub 节点，不需要陪跑真实 LLM，只有规则相关的节点需要真实）
+- 真实验收要启动独立 `codemind-rule`（8084）进程，Feign 走 `codemind.rule.url` 静态覆盖（同
+  M10 的 `codemind.integration.url` 做法），不能只关 Nacos discovery
 
 M10 可直接复用：
 - 增量 diff：`ScmContentPort.fetchCompareDiff(repo, oldHead, newHead) -> CompareResult(status, diffText)`，
@@ -130,6 +156,83 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M11 rule-service：规范文档 RAG —— 完成于 2026-10-24
+
+设计输入文档路径（`docs/design/M11-rule-upload.docx`）在仓库中不存在，经用户确认跳过 S0 文档比对，
+直接头脑风暴定设计共识，写成 spec `docs/superpowers/specs/2026-10-24-m11-rule-upload-design.md`，
+再按 `writing-plans` 落成 `docs/plans/M11.md`（T1~T16，链式依赖，`executing-plans` 顺序执行，配
+TDD）。隔离开发用 `using-git-worktrees`（`.worktrees/feat-m11-rule-upload`，分支
+`feat/m11-rule-upload`）。执行账本 `.superpowers/sdd/M11/progress.md`。
+
+改动范围（rule-service 新落地 + review-service 接入）：
+
+- rule-service（T1~T8）：pom 加 jdbc/postgresql/flyway（同 memory 做法，独立 schema `rule`）；
+  `V1__create_rule.sql` 建 `rule.document`/`rule.chunk` 两表（版本替换用部分唯一索引
+  `(project,title) where status='ACTIVE'`，`rule.chunk` 本身无 status 列，跟着所属文档走）；
+  domain `rule` 包：`RuleDocument`/`RuleChunk`/`RuleChunkCandidate`/`ScoredRuleChunk`（record）、
+  `RuleDocumentStatus` 枚举、`Embedder`/`RuleDocumentRepository`/`RuleChunkRepository` 端口、
+  `RuleDocumentChunker`（按 Markdown 标题层级切块，纯函数）、`RuleRanker`（简化版 `MemoryRanker`，
+  `score=clamp(similarity)`，无 importance/decay）；infrastructure：`HashingEmbedder`（从 memory
+  复制算法独立维护）、`JdbcRuleDocumentRepository`/`JdbcRuleChunkRepository`（两路候选 SQL，join
+  document 过滤 ACTIVE）；application：`RuleIngestionService`（`@Transactional`，切块→embedding→
+  版本替换）、`RuleRecallService`（校验+召回+排序截断）；interfaces：`RuleController`+`RuleDtos`+
+  `RuleExceptionHandler`；`RuleConfig` 装配 bean
+- review-service 接入（T9~T15）：domain `rule` 包（独立定义不跨模块共享）：`RuleRecallPort`/
+  `RecalledRule`/`RuleRecallException`；infrastructure `rule` 包：`RuleFeignClient`（`Result`
+  信封，同 M9b 教训）+ `FeignRuleRecallAdapter`；新 DAG 节点 `RecallRulesNode`（按 chunk 粒度召回
+  一次，4 维度共享，召回失败静默返回空列表不升级为 degradation）；`ReviewChunkNode` 新增可选
+  `recallRulesNodeId` 字段（向后兼容既有三/四参构造器）；`ReviewAgent` 新增三参重载
+  `review(chunk, changeMap, rules)`（向后兼容既有两个重载）；`DagOrchestrator` 新增
+  `RuleRecallPort` 构造参数（向后兼容：保留 2/4 参构造器转调 null，新增 5 参构造器）；
+  `ReviewDagConfig.dagOrchestrator` 接上 `RuleRecallPort` bean
+- 真实验收（T16）：固定资产样例 `src/test/resources/rule/sample-convention.md`（§3.2.1 方法命名
+  规则）+ 违规 diff；`RuleRecallAndCiteIT` 真实启动独立 `codemind-rule`（8084）进程 + 真实 PG，走
+  `DagOrchestrator.executeCrossSessionReview` 生产链路（ChangeMap/切片用确定性 stub，4 维度+
+  全局归约用真实 LLM）
+
+验证命令与结果（2026-10-24，真实中间件 + 真实 `CODEMIND_LLM_API_KEY`，rule-service 跑在 8084）：
+
+| 验证点 | 命令 / 用例 | 结果 |
+|---|---|---|
+| **上传规范文档后，评审意见能引用对应条款**（ROADMAP M11） | `RuleRecallAndCiteIT`（真实 LLM，走生产 `DagOrchestrator.executeCrossSessionReview` 链路） | **通过**（15.7s 实跑）。上传 §3.2.1 方法命名规则样例文档 → `rules-chunk-order` 节点真实在 4 个评审维度节点之前执行（日志证实）→ 4 维度并行真实调用真实 LLM → `ChunkReduceNode` 归约出 6 条去重 Finding → 全局归约 → 断言其中至少一条 `message` 包含 `"3.2.1"` 通过 |
+| rule-service 全仓回归 | `mvn verify -pl codemind-rule` | **通过**。40 测试 0 失败 0 错误 0 跳过 |
+| review-service 全仓回归 | `mvn verify -pl codemind-review` | **通过**。287 测试，1 error（`RealPullRequestReviewIT`，integration-service 本次未启动，环境原因与 M11 无关，M7a 既有 IT）、1 skipped（`MemoryFeignClientIT`，memory-service 未启动，M8/M9b 既有 IT，与 M11 无关），均非本次改动引入 |
+
+S6 评审（双轴独立 general-purpose 子代理，固定点 `46f44ec`，标准轴对 `CLAUDE.md` 约定、规格轴对
+`docs/plans/M11.md` 与 spec）：
+
+- 标准轴 0 硬违规；规格轴 1 Critical + 3 Important（两轴各发现部分重叠，去重后 3 条进 Fix Pass）
+- **Critical**（规格轴发现）：真实验收 IT 第 3 步原手工调用 `ReviewAgent.review(chunk, null, rules)`，
+  绕过了 `RecallRulesNode`/`ReviewChunkNode`/`DagOrchestrator` 整条生产链路——ROADMAP 验证点从未在
+  生产路径上端到端验证过。改走 `DagOrchestrator.executeCrossSessionReview`，RED→GREEN 真实跑通过
+- **Important**（两轴独立发现同一处）：`RuleIngestionService.upload` 三次独立写（archive→insert→
+  insertAll）无事务边界（spec D7 要求但未落地）。加 `@Transactional`，用 `@TestBean` 换故意失败的
+  仓储替身验证 RED（未加事务时 archivedCount=1，应为 0）→GREEN
+- **Important**（两轴独立发现同一处）：`RuleRecallService.recall` 不校验 `project`、`query` 无长度
+  上限（同模块内 `upload` 路径已校验但 `recall` 没有，不一致）。补 `MAX_PROJECT_LENGTH=255`、
+  `MAX_QUERY_LENGTH=8000`（同 memory 既定上限）
+- 已判定为既有模式非缺陷（不改代码）：验收 IT 需要手动起 rule-service 才跑——`RealPullRequestReviewIT`
+  等既有真实 IT 同样如此，是 WORKFLOW.md 验证门既定口径（跳过时不标完成）的自然结果
+
+遗留问题 / 技术债（S6 Minor，不处理）：
+
+- 空标题测试用例字面与计划 Review Focus 所列字面不完全一致（结论无误，仅输入文本差异，`"#"` 与
+  `"# "` 经 `stripTrailing()` 后行为相同）
+- `RecallRulesNode` 只捕获 `RuleRecallException` 不是 `RuntimeException`——当前唯一实现
+  `FeignRuleRecallAdapter` 已把所有异常包装，无实际风险，但换端口实现时有漏包风险
+- `codemind.rule.default-top-k` 配置项未绑定到任何代码，是死配置（实际默认值是
+  `RuleRecallService` 里的私有常量）
+- `JdbcRuleChunkRepository.insertAll` 逐条 insert，大文档切块数等于往返次数，未用批量
+- `RuleDocumentChunker` 的层级栈注释写"[level, headingText]"但实际 `int[]` 只存 level
+- `ReviewAgent` system prompt 里"违反了上方给出的团队规范条款"的"上方"指向错误——规则条款实际
+  注入在 user prompt，不在 system prompt
+- `ReviewAgent` 风格零碎：内联全限定 `java.util.stream.Collectors.joining`、`truncate` 的 500
+  是裸魔数无常量名
+- `/internal/rules/**` 端点无鉴权，同 M7a/M8/M9a 既有缺口，非本次引入
+
+与 ARCHITECTURE.md 的偏差：**已同步更新**（见下次 S8 提交的 ARCHITECTURE.md 改动）。7.4 新增
+rule-service 落地范围；5 DAG 图补 `RecallRulesNode`；8 加三条决策。
 
 ### M9b Dedup & Filter 过滤生效 —— 完成于 2026-10-23
 

@@ -168,9 +168,9 @@ BuildChangeMap → PlanChunks
                       │
       ┌───────────────┼───────────────┐   按 chunk 动态 fan-out
       ▼               ▼               ▼
- RecallContext   RecallContext   RecallContext   召回调用链代码 + 记忆 + 规则（留 M8/M11）
-      │
-     ┌────┬───┴┬────┐                            按维度并行，各注入 ChangeMap
+ RecallRules     RecallRules     RecallRules    召回规范文档条款（M11 落地）；
+      │                                          调用链代码 + 记忆召回留后续里程碑
+     ┌────┬───┴┬────┐                            按维度并行，各注入 ChangeMap + 规则条款
    Style Security Perf Test
      └────┴───┬┴────┘
           ChunkReduce  → 去重 Findings + 合并 ChunkSummary
@@ -187,6 +187,10 @@ M6 已落地：`BuildChangeMap → PlanChunks → 4N 个子会话 → N 个 Chun
 `BuildChangeMap` 排在 `PlanChunks` 之前（原图为之后）：两者无数据依赖（地图要的是全量文件列表与签名，
 与切片结果无关），但地图先行可在任何子会话启动前就落进共享状态。diff 解析不单列节点，
 由两个节点各自调用 `DiffParser`（纯函数，无副作用）。
+
+M11 接上 `RecallRules` 节点（规则知识域，详见 7.4）：`DagOrchestrator.fanOutReview` 为每个 chunk
+先建一个 `RecallRulesNode`，4 个维度的子会话节点都依赖它、共享同一次召回结果（不重复召回 4 次）。
+召回失败 / 服务不可用 / 无候选时静默返回空列表，不计入降级信息——规则缺失不代表评审质量下降。
 
 M7a 接上入口链路（此前 DAG 只在测试里被调用）：`PullRequestReceivedListener` 建完任务后
 `ReviewExecutionService.submitAsync(taskId)` 投给虚拟线程池（MQ 消费线程不被 LLM 阻塞，评审失败不触发重投）→
@@ -357,6 +361,37 @@ M8 的具体取法：
 - Embedding：domain 端口 `Embedder`，当前实现 `HashingEmbedder`（字符 bigram + ASCII 词特征哈希，256 维，确定性）。
   中转端点没有 embedding 模型；它只认字面重叠，不懂同义改写。换真实模型 = 换适配器 + 新迁移改列维度并重算
 
+### 7.4 规则知识域（rule-service）
+
+M11 落地范围：团队规范文档上传与召回。规则模板、与 memory 的否决记忆联动留后续里程碑。
+
+- 存储：独立 schema `rule`（Flyway `db/rule-migration`，同 integration/memory 做法）。两表：
+  `rule.document`（`project, title, status, version, uploaded_at`；部分唯一索引
+  `(project, title) where status='ACTIVE'`，保证同项目同标题只有一个 ACTIVE 版本）、`rule.chunk`
+  （`document_id, project, section_path, heading, content, embedding vector(256)`，**本身无 status
+  列**——切块跟着所属文档的 ACTIVE/ARCHIVED 走，两路召回候选 SQL 必须 join `rule.document` 过滤
+  ACTIVE，否则旧版本内容会和新版本一起被召回）
+- 切块：按 Markdown 标题（`#`~`######`）层级切块（`RuleDocumentChunker`，纯函数）。每个标题到下一个
+  同级或更高级标题前的正文拼成一块；`sectionPath` 取标题文本按层级拼接祖先链（`" > "` 分隔），不强制
+  要求文档写死数字编号；空块（标题后无正文）与无标题的正文一律跳过
+- 版本替换：`RuleIngestionService.upload`（`@Transactional`）同 `project+title` 重新上传时，
+  先把旧 ACTIVE 文档转 ARCHIVED 再插入新文档 + 新切块，version 递增；三步必须整体成功或整体回滚
+  （否则会留下「一个 ACTIVE 版本都不剩」或「ACTIVE 文档存在但零 chunk」的脏状态，召回静默返回空
+  且无人可知）
+- 检索：复用 memory M8 的技术路径（本地特征哈希 `HashingEmbedder`，算法与 memory 一致但各自模块
+  独立维护一份实现，不跨模块共享类）+ pg_trgm 两路候选，`score = clamp(similarity)`——**不含
+  importance/decay**：规则条款没有「重要性/衰减」概念，只有 ACTIVE/ARCHIVED 两态（版本替换，不是
+  「强化」）。两路都按 `(project, status via join)` 过滤后精确扫描，不建近似索引（同 M8 结论）
+- review 侧接入（DAG，见 5）：`RuleRecallPort`（domain 出站端口，review 侧独立定义不跨模块共享）
+  → `FeignRuleRecallAdapter`（Feign 调 rule 的 internal 端点，`Result` 信封同 M9b 教训：声明成裸
+  DTO 会让召回结果恒为 null）→ `RecallRulesNode`（DAG 节点，按 chunk 粒度调用一次，4 个评审维度
+  共享结果）→ `ReviewChunkNode`/`ReviewAgent` 注入到 prompt。引用形式：`Finding.message` 文本内嵌
+  `《文档标题》sectionPath`，不新增结构化字段（改动面小，不动 `Finding` 值对象）
+- 已知范围边界：规则条款注入 prompt 时只做简单截断（500 字符/条），未纳入 6.3 的 token 预算分配
+  与降级链（规则+记忆合占 15% 预算的具体分配策略留后续里程碑）；`/internal/rules/**` 端点无鉴权，
+  同 M7a/M8/M9a 既有缺口；不支持 docx/PDF，仅 Markdown/纯文本；规则模板与团队规范的否决记忆联动
+  （rule-service 与 memory-service 之间）留后续里程碑
+
 ## 8. 设计决策记录
 
 | 决策 | 理由 |
@@ -373,3 +408,6 @@ M8 的具体取法：
 | memory 先用本地特征哈希 embedding（M8） | 现有中转端点无 embedding 模型；端口隔离，换模型只动适配器与列维度 |
 | 反馈靠轮询而非 webhook，只学有写权限者的反馈（M9a） | GitHub 没有 reaction webhook；公开仓库任何人都能 👎 |
 | 冲突消解的 LLM 决定外加硬约束（M9a） | LLM 会把两条否决当矛盾互删、把 NOOP 落到缺陷上；硬约束保证结果里总有否决记忆、不误删规范 |
+| rule-service 独立落地，不并入 memory-service、不做 rule→memory 检索代理（M11） | 职责边界清晰（ARCHITECTURE 3.1 已定好六个服务）；检索转发会造成「规则知识域反向依赖记忆域」的语义错误 |
+| 规则条款打分不含 importance/decay，简化于 memory 的 ScoringPolicy（M11） | 规则条款没有「重要性/衰减」概念，不会被否决也不会过时失效，只有版本替换这一种状态变更 |
+| `DagOrchestrator`/`ReviewChunkNode`/`ReviewAgent` 新增参数走向后兼容路线而非打破既有签名（M11） | 保留 M5~M10 既有构造器/重载，新增参数默认 null 时行为等价于 M11 之前；避免牵连一整批既有测试改签名 |
