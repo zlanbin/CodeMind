@@ -1,12 +1,14 @@
 package com.codemind.review.application;
 
-import com.codemind.review.domain.agent.AgentReview;
-import com.codemind.review.domain.agent.ReviewAgent;
-import com.codemind.review.domain.agent.ReviewDimension;
+import com.codemind.review.domain.changemap.ChangeMap;
 import com.codemind.review.domain.chunk.ReviewChunk;
+import com.codemind.review.domain.dag.CrossSessionReviewResult;
+import com.codemind.review.domain.dag.DagOrchestrator;
+import com.codemind.review.domain.dag.Node;
+import com.codemind.review.domain.dag.NodeContext;
 import com.codemind.review.domain.finding.Finding;
-import com.codemind.review.domain.rule.RecalledRule;
 import com.codemind.review.domain.rule.RuleRecallPort;
+import com.codemind.review.domain.task.ReviewTask;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -31,8 +33,18 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>固定资产样例：{@code src/test/resources/rule/sample-convention.md}（含 §3.2.1 方法命名规则）+
  * 一个违反该规则的 diff 样例（新增单字母命名方法）。真实走 {@code POST /internal/rules/documents} →
- * {@link RuleRecallPort}（经 Feign 真实调用 rule-service）→ {@link ReviewAgent} 真实 LLM 评审 →
+ * 容器里装配好的 {@link DagOrchestrator}（真的含 {@link RuleRecallPort}，经 Feign 真实调用
+ * rule-service）→ {@code executeCrossSessionReview}（真实跑 {@code RecallRulesNode} →
+ * {@code ReviewChunkNode} × 4 维度 → {@code ChunkReduceNode}，4 个维度都用真实 LLM）→
  * 断言返回的 {@code Finding} 列表至少一条 {@code message} 包含 sectionPath {@code "3.2.1"}。
+ *
+ * <p>S6 规格轴发现：早期版本第 3 步直接手工调用 {@code ReviewAgent.review(chunk, null, rules)}，
+ * 绕过了 {@code RecallRulesNode}/{@code ReviewChunkNode}/{@code DagOrchestrator} 整条生产链路——
+ * ROADMAP 验证点从未在真实生产路径上端到端验证过（账本 Task 15 记录的真实 bug，即
+ * {@code ReviewDagConfig} 漏传 {@code RuleRecallPort} 导致 {@code RecallRulesNode} 永不创建，
+ * 正是这类缺口的例子，当时只被一条反射断言抓到）。现改为走
+ * {@code DagOrchestrator.executeCrossSessionReview}，ChangeMap/切片阶段用确定性 stub 节点
+ * （不需要真实 LLM，和 M11 验证点无关），4 个评审维度与全局归约仍用容器里装配好的真实 LlmClient。
  *
  * <p>前置（三者齐备才跑，否则 {@code assumeTrue} 跳过，同既有真实 LLM IT 口径——
  * 跳过时该里程碑不能标完成，但测试本身不因缺前置而报失败）：
@@ -74,13 +86,10 @@ class RuleRecallAndCiteIT {
     private final RestTemplate rest = new RestTemplate();
 
     @Autowired
-    private RuleRecallPort ruleRecallPort;
-
-    @Autowired
-    private Map<ReviewDimension, ReviewAgent> reviewAgents;
+    private DagOrchestrator dagOrchestrator;
 
     @Test
-    void realLlmCitesSectionPathWhenRuleIsViolated() {
+    void realLlmCitesSectionPathWhenRuleIsViolated() throws Exception {
         assumeTrue(hasRealKey(), "未设置真实 CODEMIND_LLM_API_KEY，跳过真实 LLM 调用");
         assumeTrue(ruleServiceReachable(), "rule-service 未在本机 8084 运行，跳过真实验收（见类注释前置条件）");
 
@@ -95,27 +104,34 @@ class RuleRecallAndCiteIT {
         assertTrue(uploadResponse.getStatusCode().is2xxSuccessful(),
                 "上传规范文档应成功，实际: " + uploadResponse.getStatusCode());
 
-        // 2. 真实召回（经 Feign 调 rule-service，证明 RuleRecallPort 端到端可用）
-        List<RecalledRule> rules = ruleRecallPort.recall(project, "方法命名 单字母", 5);
-        assertFalse(rules.isEmpty(), "应召回到样例文档里的方法命名条款");
-
-        // 3. 真实 LLM 评审：注入召回到的规则，断言输出引用了 sectionPath
+        // 2. 真实走生产 DAG 链路：BuildChangeMap（stub，不碰真实 LLM，与本验证点无关）→ PlanChunks
+        // （stub，直接返回预设 chunk）→ RecallRulesNode（真经 Feign 调 rule-service）→
+        // ReviewChunkNode × 4 维度（真实 LLM）→ ChunkReduceNode → GlobalReduce（真实 LLM，容器已装配）
         ReviewChunk chunk = new ReviewChunk(
                 "chunk-order", List.of("OrderService.java"), List.of("OrderService#x(int,int)"),
                 DIFF, 120, false);
-        ReviewAgent agent = reviewAgents.get(ReviewDimension.STYLE);
+        Node changeMapNode = new StubNode("build-change-map",
+                ChangeMap.of("intent", List.of(), List.of(), List.of(), List.of()));
+        Node planNode = new StubNode("plan-chunks", List.of(chunk));
+        ReviewTask task = ReviewTask.create(project, 1, "head-1", "base-1", "evt-" + UUID.randomUUID());
 
-        AgentReview review = agent.review(chunk, null, rules);
+        CrossSessionReviewResult result = dagOrchestrator.executeCrossSessionReview(
+                changeMapNode, planNode, task, NodeContext.initial("task-" + UUID.randomUUID()));
 
-        assertFalse(review.degraded(),
-                () -> "真实 LLM 输出未能解析为合法 Finding JSON，降级原因: " + review.degradeReason());
-        List<Finding> findings = review.findings();
+        List<Finding> findings = result.allFindings();
         boolean citesSectionPath = findings.stream().anyMatch(f -> f.message().contains("3.2.1"));
         assertTrue(citesSectionPath,
                 "至少一条 Finding 的 message 应引用 sectionPath 3.2.1，实际 messages: "
                         + findings.stream().map(Finding::message).toList());
-        System.out.println("[RuleRecallAndCiteIT] 真实 LLM 返回 " + findings.size()
-                + " 条 Finding，召回 " + rules.size() + " 条规则条款");
+        System.out.println("[RuleRecallAndCiteIT] 真实生产 DAG 链路返回 " + findings.size() + " 条 Finding");
+    }
+
+    /** Stub 节点：直接返回预设结果，不实际计算（ChangeMap/切片阶段与本验证点无关）。 */
+    private record StubNode(String id, Object result) implements Node {
+        @Override
+        public Object execute(NodeContext context) {
+            return result;
+        }
     }
 
     private boolean ruleServiceReachable() {
