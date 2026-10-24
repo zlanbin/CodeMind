@@ -5,25 +5,51 @@
 
 ## 当前状态
 
-- 当前里程碑：**M12 已完成**（可观测与压测，ROADMAP M12 验证点「Grafana 可见指标，压测报告存入
-  `docs/reports/`」两项均已达成：Token 成本指标按 call_site 分组、DAG 节点耗时指标按 node_type
-  分组，均在 Grafana 后端 API 查询层面坐实非空数据；真实压测报告存入
-  `docs/reports/M12-loadtest.md`）。M8/M9a/M9b/M10/M11 均已合并进 `master` 并推送到
-  `origin/master`（`1731c4d`）
+- 当前里程碑：**M13 已完成**（文档、演示脚本、README 指标，ROADMAP M13 验证点「新环境按
+  演示脚本从零跑通」已达成：`D:\daima\codeTest` 全新 clone 目录，`docs/demo/00~07*.sh` 九个
+  脚本 + `docs/demo/WALKTHROUGH.md` 走完步骤 0~7，真实覆盖 M7b 回写、M9a/M9b 反馈闭环、M10
+  增量评审、M11 规则召回、M12 可观测指标，全部真实验证通过，非 mock）。M0~M12 全部完成，
+  均已合并进 `master`
 - 上次更新：2026-10-24
-- 分支：`feat/m12-observability-loadtest`（基于 master `12ce9a7`），12 个 commit（T1~T6 实现
-  + 1 个 T1 裁决收尾 + 1 个 T5 裁决修复 + 3 个 Final Review 修复 commit），`subagent-driven-development`
-  执行，每个任务独立审查 + 整条分支最终审查（opus）+ 一轮 fix + 一轮 scoped re-review，全部 clean。
-  尚未合并进 master（等待下一步：会话内已选择「本地合并」，见下）
+- 分支：本次 M13 工作直接在 `master` 上进行（纯文档 + 脚本改动，`docs/demo/*`、`README.md`，
+  未改任何服务代码），尚未提交
 - 阻塞项：无
-- 未验证项：无。review-service 全量 `mvn test` 237 tests 0 failures/errors/skipped（无回归）。
-  真实压测 `LoadTestRunner`（10 并发 × 30 任务）跑了 4 轮，全部 30/30 成功 0 失败 0 超时；
-  Grafana 两个面板（Token 用量、节点耗时 P95）经 Grafana 后端 API 实测确认非空非 NaN 数据
+- 未验证项：无。全部 8 个步骤均在新 clone 目录里真实跑通，细节见下方「M13」小节
 
 ## 下一个会话要做的事
 
-M12 合并完成后，下一个里程碑是 **M13 文档、演示脚本、README 指标**（见 `docs/ROADMAP.md`），
-验证点是「新环境按演示脚本从零跑通」。
+M13 是 ROADMAP 里程碑清单的最后一项（M0~M13 全部完成）。下一步看用户是否有新的里程碑需求；
+若没有，CodeMind 已具备 ROADMAP 定义的全部能力。
+
+M13 可直接复用：
+- 全链路演示脚本在 `docs/demo/00~07*.sh` + `99-stop.sh`，`docs/demo/WALKTHROUGH.md` 是串讲
+  文档，新环境验证直接照这个走，不用从头现想命令
+- 演示用的 sandbox PR 固定在 `zlanbin/codemind-sandbox` PR #4（分支 `demo/m13-walkthrough`），
+  装了规范违规方法名 `x()` + 整数溢出 bug，专用于反复验证，不影响 M7a/M7b/M9a/M10/M11 用过的
+  PR #1/#2/#3
+- 密钥管理：演示需要 `lan-bin` 账号的 **classic token**（`repo` scope），不能用 fine-grained
+  token——fine-grained PAT 的 "Only select repositories" 只能选 token 持有者自己拥有的仓库，
+  协作者身份（即使已接受邀请、`role_name=write`）也选不到别人账号下的仓库，这是 GitHub 的
+  已知限制（M13 实测踩过，生成 classic token 后问题消失）
+- RocketMQ 积压排查：`docs/operations/M7b-publication.md` 的「outbox 未 ACK」排查路径里没覆盖
+  到"MQ topic 本身被历史积压消息堵死"这种情况——这种情况下 review 侧 outbox 会显示
+  `attempts` 持续增长但 `acknowledged_at` 一直为空，integration 侧账本表里却完全查不到对应
+  `task_id` 的记录（消息还没被消费到）。诊断用
+  `mqadmin consumerProgress -n rocketmq-namesrv:9876 -g codemind-integration-review-completed`
+  查 `Diff` 列，正常应在几十条以内；偏高（几千条）就是积压，用 `mqadmin resetOffsetByTime`
+  把 `codemind-review-completed` 和 `%RETRY%codemind-integration-review-completed` 两个
+  topic 的 consumer offset 都重置到 `now`，跳过积压
+- **Grafana `rate(...[5m])` 查询时机陷阱的精确根因**（M12 报告记过"等太久会滑出窗口"，M13
+  实测进一步定位到具体边界）：DAG 节点耗时打点发生在任务到达 `AGGREGATING`（`GLOBAL_REDUCE`
+  在 `AGGREGATING` 阶段内完成）之前，但任务要到 `PUBLISHED`（outbox 重投 + 回写 GitHub）往往
+  还要再等 5~8 分钟。**如果等任务 `PUBLISHED` 之后才去查 P95 面板，几乎必然滑出 5 分钟窗口
+  拿到 NaN**——这不是限流、不是 Prometheus 抓取延迟（本里程碑实测排查时都怀疑过这两个方向，
+  最后用 `query_range` 对比节点完成时刻与查询时刻的时间差才定位到根因）。正确做法是任务到
+  `AGGREGATING` 就立刻查，不等 `PUBLISHED`
+- 真实 GitHub token 限流：`zlanbin` 的 `GITHUB_TOKEN`（5000 次/小时）在反复验证同一条链路
+  （多次触发评审 + 处理 MQ 积压期间的重试请求）时会在 1 小时内打满，打满后 integration 侧
+  对真实 GitHub 调用全部返回 403，查 `curl -H "Authorization: Bearer $GITHUB_TOKEN"
+  https://api.github.com/rate_limit` 的 `remaining`/`reset` 判断要不要等
 
 M12 可直接复用：
 - Token 成本埋点：`LlmClient.complete(systemPrompt, userPrompt, callSite)`，`callSite` 固定
@@ -202,6 +228,56 @@ M2/M3 可直接复用的东西（未变）：
 - DAG：`DagDefinition`（builder）+ `DagScheduler`（虚拟线程并行、checkpoint 续跑）+ `node_run` 表（V3）
 
 ## 已完成里程碑
+
+### M13 文档、演示脚本、README 指标 —— 完成于 2026-10-24
+
+纯文档 + 脚本里程碑，无独立设计输入文档，S1 头脑风暴定设计共识（脚本粒度：分步 shell 脚本 +
+markdown walkthrough；覆盖深度：全链路含 M7~M12；sandbox PR：新开专用 PR；验证方式：新目录
+`D:\daima\codeTest` clone 全新仓库跑通），按 bounded 任务走（跳过 S2~S4 计划文档），直接进 S5
+实现 + 实测验证。
+
+改动范围（只动文档和脚本，未改任何服务代码）：
+
+- `docs/demo/00~07*.sh` + `99-stop.sh`（9 个脚本）+ `docs/demo/WALKTHROUGH.md`：密钥检查 →
+  起基础设施 → 构建起 6 服务 → 上传规范文档 → 触发评审（真实 webhook + 真实 LLM + 真实回写）→
+  反馈闭环（真实 👎 + 回复 + 轮询）→ 增量评审（第二次 push）→ 核实 Grafana 指标
+- `README.md`：新增「核心能力」清单（多 Agent 并行评审/跨会话 Map-Reduce/行级回写/反馈学习
+  闭环/增量评审/团队规范 RAG/可观测，覆盖 M8~M12 此前未写进 README 的能力）、「验证点与测试
+  规模」指标小节、启动命令补 `CODEMIND_LLM_API_KEY`/`GITHUB_TOKEN` 说明、新增「全链路功能
+  演示」小节指向 `docs/demo/WALKTHROUGH.md`
+
+验证方式与结果（2026-10-24，`D:\daima\codeTest` 全新 clone 目录，真实中间件 + 真实
+`CODEMIND_LLM_API_KEY`/`GITHUB_TOKEN`/`lan-bin` classic token）：
+
+| 验证点 | 做法 | 结果 |
+|---|---|---|
+| **新环境按演示脚本从零跑通**（ROADMAP M13） | 在全新目录完整走完 `docs/demo/00~07*.sh` 步骤 0~7 | **通过**。密钥检查、起基础设施（容器复用同一套 compose 工程，具名卷数据不丢）、`mvn package` 构建 + 起 6 服务全 UP、上传规范文档（chunkCount=1）均成功 |
+| 真实评审 + 规则召回 + 回写（M7b + M11） | sandbox PR #4（`lan-bin` 开，内含方法名 `x()` 违规 + 整数溢出 bug），真实 webhook → 真实 4 维度并行 LLM 评审 → 真实回写 | **通过**。行级评论命中第 14 行（引用《示例团队规范》3.2.1）、第 15 行（CRITICAL 整数溢出），review `5638253675` 由 `zlanbin` 发布（非 PR 作者，符合 422 规避约束） |
+| 反馈闭环（M9a/M9b） | 对 STYLE 评论回复「内部临时脚手架代码，不对外暴露，不需要遵守命名规范」+ 👎，触发 `/internal/feedback/poll` | **通过**。LLM 正确抽取出方向正确的两条否决记忆（`[STYLE]`/`[DESIGN]` 均为"允许/不要求"而非误判方向），`importance=0.9` |
+| 增量评审（M10） | 第二次 push（新增 `applyFixedFee` 方法），第二次 webhook（`action=synchronize`） | **通过**。`last_reviewed_head` 正确记录 base/head；第二次评审意见数从 6 条降到 2 条（均为新增 diff 的 TEST 维度意见）；否决过的命名违规意见在新评审中未再出现（`FindingFilter` 真实拦截） |
+| Grafana 可观测指标（M12） | Token 用量面板（累计计数器，任意时刻查询）+ DAG 节点耗时 P95 面板（`rate(...[5m])`，需在任务到 `AGGREGATING` 后立刻查） | **通过**。Token 面板 7 个 call_site 全覆盖（含 `FINDING_FILTER`，证明反馈过滤真实被调用）；P95 面板 6 个 node_type 全部拿到非 NaN 真实数值（`REVIEW_CHUNK`=14.03s/`BUILD_CHANGE_MAP`=5.66s/`GLOBAL_REDUCE`=3.20s/`RECALL_RULES`=0.017s/`PLAN_CHUNKS`=0.022s/`CHUNK_REDUCE`=0.0055s） |
+
+验证过程中发现并处理的真实环境问题（详见上方「M13 可直接复用」）：
+1. `03-upload-rule.sh` 用不可用的 `python3`（Windows Store 占位程序）做 JSON 转义兜底，改用
+   `node -e`；进一步发现 mingw 原生 `curl.exe` 处理含中文的命令行参数/变量展开会损坏 UTF-8
+   字节（导致 Jackson 报「请求体无法解析」），统一改为写临时文件 + `curl --data-binary @file`
+2. `lan-bin` 的 fine-grained token 怎么配置 Repository access 都查不到 `codemind-sandbox`
+   （即使已是协作者）——根因是 fine-grained PAT 无法访问「协作者身份参与、非持有者拥有」的
+   仓库，换成 classic token（`repo` scope）后问题消失
+3. RocketMQ `codemind-review-completed` 系列 topic 积压 5000+ 条历史失败消息，把新事件的
+   消费吞吐堵死，新评审卡在 `AGGREGATING` 不推进；用 `mqadmin resetOffsetByTime` 跳过积压解决
+4. 演示脚本原定 150s 的 `PUBLISHED` 轮询超时在真实环境下不够（outbox 重投间隔 + 真实回写
+   延迟），放宽到 500s
+5. Grafana P95 面板反复查到 NaN，最终定位根因是查询时机选在了任务 `PUBLISHED`（全流程终态，
+   比节点打点晚 5~8 分钟）之后，而不是节点指标真正产生的 `AGGREGATING` 阶段——用
+   `query_range` 对比节点完成时刻与查询时刻的时间差才确认，排除了限流和 Prometheus 抓取延迟
+   两个错误假设
+
+安全事项（本会话中途发生，已处理）：过程中 `lan-bin` 的两个 GitHub token（一个 fine-grained、
+一个 classic）先后被用户明文贴入对话，已提醒用户在演示结束后立即 revoke 并重新生成；
+`LANBIN_GITHUB_TOKEN` 只写入本机密钥文件 `~/.codemind-secrets.env`，命令输出中未重复回显值。
+
+与 ARCHITECTURE.md 的偏差：无需同步（不改设计、不改代码，纯文档与演示脚本）。
 
 ### M12 可观测与压测 —— 完成于 2026-10-24
 
