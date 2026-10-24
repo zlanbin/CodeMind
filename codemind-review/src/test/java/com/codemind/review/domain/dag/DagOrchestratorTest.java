@@ -5,6 +5,9 @@ import com.codemind.review.domain.chunk.ReviewChunk;
 import com.codemind.review.domain.finding.Category;
 import com.codemind.review.domain.finding.Finding;
 import com.codemind.review.domain.finding.Severity;
+import com.codemind.review.domain.rule.RecalledRule;
+import com.codemind.review.domain.rule.RuleRecallPort;
+import com.codemind.review.domain.task.ReviewTask;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +15,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -93,6 +97,72 @@ class DagOrchestratorTest {
         ChunkReduceResult r2 = results.get("chunk-2");
         assertNotNull(r2);
         assertEquals(2, r2.findings().size(), "chunk-2 同样产出 2 条去重后意见");
+    }
+
+    @Test
+    void recallRulesNodeCalledOncePerChunkNotOncePerDimension() throws DagExecutionException {
+        AtomicInteger callCount = new AtomicInteger();
+        RuleRecallPort countingPort = (project, query, topK) -> {
+            callCount.incrementAndGet();
+            return List.of(new RecalledRule("规范", "1.1", "标题", "内容", 0.9));
+        };
+        StubLlmClient globalReduceLlm = new StubLlmClient("""
+                {"findings":[]}
+                """);
+        DagOrchestrator orchestrator = new DagOrchestrator(scheduler, agents,
+                new GlobalReduceAgent(globalReduceLlm, new FindingJsonParser(), 0), null, countingPort);
+
+        List<ReviewChunk> chunks = List.of(
+                new ReviewChunk("chunk-1", List.of("A.java"), List.of("A#foo"),
+                        "@@ -1,2 +1,3 @@\n+int x = 1;", 10, false),
+                new ReviewChunk("chunk-2", List.of("B.java"), List.of("B#bar"),
+                        "@@ -1,2 +1,3 @@\n+int y = 2;", 10, false)
+        );
+        Node changeMapNode = new StubNode("build-change-map",
+                com.codemind.review.domain.changemap.ChangeMap.of("intent", List.of(), List.of(), List.of(), List.of()));
+        Node planNode = new StubPlanChunksNode("plan-chunks", chunks);
+        ReviewTask task = ReviewTask.create("org/repo", 1, "head-1", "base-1", "evt-1");
+
+        orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, NodeContext.initial("task-1"));
+
+        assertEquals(2, callCount.get(), "2 个 chunk 各召回一次，4 个维度共享结果，不是召回 8 次");
+    }
+
+    @Test
+    void nullRulePortSkipsRecallRulesNode() throws DagExecutionException {
+        // 向后兼容：不传 rulePort（null）时行为等同 M6 前，不建 RecallRulesNode
+        DagOrchestrator orchestrator = new DagOrchestrator(scheduler, agents);
+
+        List<ReviewChunk> chunks = List.of(
+                new ReviewChunk("chunk-1", List.of("A.java"), List.of("A#foo"),
+                        "@@ -1,2 +1,3 @@\n+int x = 1;", 10, false)
+        );
+        Node planNode = new StubPlanChunksNode("plan", chunks);
+
+        Map<String, ChunkReduceResult> results = orchestrator.executeReview(planNode, NodeContext.initial("task-1"));
+
+        assertEquals(1, results.size());
+    }
+
+    /** Stub 节点：直接返回预设结果，不实际计算。 */
+    private static final class StubNode implements Node {
+        private final String nodeId;
+        private final Object result;
+
+        StubNode(String nodeId, Object result) {
+            this.nodeId = nodeId;
+            this.result = result;
+        }
+
+        @Override
+        public String id() {
+            return nodeId;
+        }
+
+        @Override
+        public Object execute(NodeContext context) {
+            return result;
+        }
     }
 
     @Test

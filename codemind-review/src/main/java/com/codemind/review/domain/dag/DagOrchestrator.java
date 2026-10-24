@@ -6,6 +6,7 @@ import com.codemind.review.domain.agent.ReviewAgent;
 import com.codemind.review.domain.agent.ReviewDimension;
 import com.codemind.review.domain.changemap.ChangeMap;
 import com.codemind.review.domain.chunk.ReviewChunk;
+import com.codemind.review.domain.rule.RuleRecallPort;
 import com.codemind.review.domain.task.ReviewTask;
 import com.codemind.review.domain.task.ReviewTaskRepository;
 import com.codemind.review.domain.task.ReviewTaskStatus;
@@ -38,15 +39,18 @@ public final class DagOrchestrator {
     private final Map<ReviewDimension, ReviewAgent> agents;
     private final GlobalReduceAgent globalReduceAgent;
     private final ReviewTaskRepository taskRepository;
+    private final RuleRecallPort rulePort;
 
     /**
      * M5 签名：只能跑到 ChunkReduce，没有全局归约。
      */
     public DagOrchestrator(DagScheduler scheduler, Map<ReviewDimension, ReviewAgent> agents) {
-        this(scheduler, agents, null, null);
+        this(scheduler, agents, null, null, null);
     }
 
     /**
+     * M6 签名：向后兼容，{@code rulePort} 为 null（M11 前行为，不召回规则）。
+     *
      * @param scheduler         拓扑调度器
      * @param agents            各维度 Agent（Style / Security / Perf / Test）
      * @param globalReduceAgent 全局归约 Agent（M6；为 null 时不能跑跨会话流程）
@@ -54,9 +58,23 @@ public final class DagOrchestrator {
      */
     public DagOrchestrator(DagScheduler scheduler, Map<ReviewDimension, ReviewAgent> agents,
                            GlobalReduceAgent globalReduceAgent, ReviewTaskRepository taskRepository) {
+        this(scheduler, agents, globalReduceAgent, taskRepository, null);
+    }
+
+    /**
+     * @param scheduler         拓扑调度器
+     * @param agents            各维度 Agent（Style / Security / Perf / Test）
+     * @param globalReduceAgent 全局归约 Agent（M6；为 null 时不能跑跨会话流程）
+     * @param taskRepository    任务仓储，用于状态流转落库（可为 null，此时只在内存推进状态）
+     * @param rulePort          规则召回端口（M11；为 null 时不建 RecallRulesNode，评审不注入规则条款）
+     */
+    public DagOrchestrator(DagScheduler scheduler, Map<ReviewDimension, ReviewAgent> agents,
+                           GlobalReduceAgent globalReduceAgent, ReviewTaskRepository taskRepository,
+                           RuleRecallPort rulePort) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.globalReduceAgent = globalReduceAgent;
         this.taskRepository = taskRepository;
+        this.rulePort = rulePort;
         this.agents = Map.copyOf(agents);
         if (agents.size() != 4) {
             throw new IllegalArgumentException("必须提供 4 个维度 Agent，实际 " + agents.size());
@@ -94,7 +112,7 @@ public final class DagOrchestrator {
             return Map.of();
         }
 
-        FanOut fanOut = fanOutReview(chunks, afterPlan, null);
+        FanOut fanOut = fanOutReview(chunks, afterPlan, null, null);
         Map<String, ChunkReduceResult> results = collectReduceResults(fanOut);
         log.info("任务 {} 评审完成，{} 个 chunk 归约完毕", initialContext.taskId(), results.size());
         return results;
@@ -163,7 +181,8 @@ public final class DagOrchestrator {
 
         // 2. 子会话并行评审 + 片级归约
         advance(task, ReviewTaskStatus.REVIEWING);
-        FanOut fanOut = fanOutReview(chunks, afterPlan, changeMap);
+        String project = task != null ? task.repo() : null;
+        FanOut fanOut = fanOutReview(chunks, afterPlan, changeMap, project);
         Map<String, ChunkReduceResult> chunkResults = collectReduceResults(fanOut);
         if (task != null) {
             chunkResults.values().stream()
@@ -203,19 +222,36 @@ public final class DagOrchestrator {
         return result;
     }
 
-    /** 为每个 chunk × 维度建评审节点并执行到片级归约。 */
-    private FanOut fanOutReview(List<ReviewChunk> chunks, NodeContext context, ChangeMap changeMap)
+    /**
+     * 为每个 chunk × 维度建评审节点并执行到片级归约。
+     *
+     * <p>{@code project} 与 {@link #rulePort} 都非 null 时，每个 chunk 先建一个
+     * {@link RecallRulesNode}（M11），4 个维度的评审节点共享它的结果，不重复召回。
+     */
+    private FanOut fanOutReview(List<ReviewChunk> chunks, NodeContext context, ChangeMap changeMap, String project)
             throws DagExecutionException {
         DagDefinition.Builder reviewDagBuilder = DagDefinition.builder();
         Map<String, String> chunkReduceNodeIds = new HashMap<>();  // chunkId -> reduceNodeId
+        boolean recallRulesEnabled = rulePort != null && project != null;
 
         for (ReviewChunk chunk : chunks) {
+            String recallRulesNodeId = null;
+            if (recallRulesEnabled) {
+                recallRulesNodeId = "rules-" + chunk.chunkId();
+                reviewDagBuilder.addNode(new RecallRulesNode(recallRulesNodeId, rulePort, project, chunk));
+            }
+
             List<String> reviewNodeIds = new ArrayList<>();
             for (ReviewDimension dim : ReviewDimension.values()) {
                 String reviewNodeId = "review-" + chunk.chunkId() + "-" + dim.name().toLowerCase();
-                ReviewChunkNode reviewNode =
-                        new ReviewChunkNode(reviewNodeId, agents.get(dim), chunk, changeMap);
-                reviewDagBuilder.addNode(reviewNode);
+                ReviewChunkNode reviewNode = recallRulesEnabled
+                        ? new ReviewChunkNode(reviewNodeId, agents.get(dim), chunk, changeMap, recallRulesNodeId)
+                        : new ReviewChunkNode(reviewNodeId, agents.get(dim), chunk, changeMap);
+                if (recallRulesEnabled) {
+                    reviewDagBuilder.addNode(reviewNode, List.of(recallRulesNodeId));
+                } else {
+                    reviewDagBuilder.addNode(reviewNode);
+                }
                 reviewNodeIds.add(reviewNodeId);
             }
             String reduceNodeId = "reduce-" + chunk.chunkId();
