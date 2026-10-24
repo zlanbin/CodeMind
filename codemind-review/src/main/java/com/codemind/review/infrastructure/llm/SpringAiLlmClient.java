@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
@@ -18,8 +19,12 @@ import org.springframework.stereotype.Component;
  *
  * <p>M12：每次调用从 {@link ChatResponse} 的 usage 元数据读取真实 prompt/completion token 数，
  * 按 {@code callSite} 打到 {@code codemind_llm_tokens_total} 计数器（Task 4 Grafana dashboard 消费）。
+ *
+ * <p>M12 Task 5：{@code loadtest} profile 下用 {@link StubLlmClient} 替换，二者用
+ * {@code @Profile} 互斥，保证容器里只有一个 {@link LlmClient} bean。
  */
 @Component
+@Profile("!loadtest")
 public class SpringAiLlmClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(SpringAiLlmClient.class);
