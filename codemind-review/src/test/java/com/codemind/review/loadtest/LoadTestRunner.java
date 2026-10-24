@@ -165,31 +165,56 @@ public final class LoadTestRunner {
     private static void pollUntilDone(Connection conn, TaskResult result) throws Exception {
         Instant deadline = result.sentAt.plus(POLL_TIMEOUT);
         String sql = "select status, updated_at from review_task where repo = ? and pr_number = ? and head_sha = ?";
+        // 先查一次当前状态，不管 deadline 是否已经过期（串行轮询下，排在队尾的任务轮到它查询时
+        // deadline 可能早就过了，但它本身可能早就到达终态——必须先查一次才知道，不能让下面的
+        // while 循环因为 deadline 已过而直接跳过、把它误判成 NOT_FOUND）。
+        QueryOutcome initial = queryOnce(conn, sql, result);
+        if (initial.done) {
+            result.finishedAt = initial.updatedAt;
+            result.finalStatus = initial.status;
+            result.outcome = "FAILED".equals(initial.status) ? Outcome.FAILED : Outcome.SUCCESS;
+            return;
+        }
+        result.lastSeenStatus = initial.status;
         while (Instant.now().isBefore(deadline)) {
-            try (var ps = conn.prepareStatement(sql)) {
-                ps.setString(1, result.spec.repo());
-                ps.setInt(2, result.spec.prNumber());
-                ps.setString(3, result.spec.headSha());
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String status = rs.getString("status");
-                        if ("AGGREGATING".equals(status) || "FAILED".equals(status)) {
-                            result.finishedAt = Instant.now();
-                            result.finalStatus = status;
-                            result.outcome = "FAILED".equals(status) ? Outcome.FAILED : Outcome.SUCCESS;
-                            return;
-                        }
-                        result.lastSeenStatus = status;
-                    } else {
-                        result.lastSeenStatus = null;
-                    }
-                }
-            }
             Thread.sleep(POLL_INTERVAL.toMillis());
+            QueryOutcome outcome = queryOnce(conn, sql, result);
+            if (outcome.done) {
+                // finishedAt 用数据库 updated_at（任务真正到达终态的时刻），不是「轮到它查询时」
+                // 的 Instant.now()——串行轮询下后者会被排队顺序污染，变成「真实完成时刻的滚动
+                // 最大值」，抹掉真实的延迟离散度。
+                result.finishedAt = outcome.updatedAt;
+                result.finalStatus = outcome.status;
+                result.outcome = "FAILED".equals(outcome.status) ? Outcome.FAILED : Outcome.SUCCESS;
+                return;
+            }
+            result.lastSeenStatus = outcome.status;
         }
         // 超时：区分「从未在表里出现过」和「出现过但卡在中间状态」
         result.finishedAt = Instant.now();
         result.outcome = (result.lastSeenStatus == null) ? Outcome.NOT_FOUND : Outcome.TIMEOUT;
+    }
+
+    /** 查一次任务当前状态；到达终态（AGGREGATING/FAILED）时附带数据库里的 updated_at。 */
+    private static QueryOutcome queryOnce(Connection conn, String sql, TaskResult result) throws Exception {
+        try (var ps = conn.prepareStatement(sql)) {
+            ps.setString(1, result.spec.repo());
+            ps.setInt(2, result.spec.prNumber());
+            ps.setString(3, result.spec.headSha());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return new QueryOutcome(false, null, null);
+                }
+                String status = rs.getString("status");
+                if ("AGGREGATING".equals(status) || "FAILED".equals(status)) {
+                    return new QueryOutcome(true, status, rs.getTimestamp("updated_at").toInstant());
+                }
+                return new QueryOutcome(false, status, null);
+            }
+        }
+    }
+
+    private record QueryOutcome(boolean done, String status, Instant updatedAt) {
     }
 
     private static void printSummary(List<TaskResult> results) {

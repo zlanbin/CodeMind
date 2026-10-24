@@ -82,3 +82,109 @@
 - Grafana 节点耗时 P95 面板**未验证通过**（指标类型与面板查询不匹配，从未产生过数据）。
 
 按硬门禁"跳过的测试不算通过"的精神类推，这两项不应标记为完成，需要用户决定是否回 S5 补齐（给 `StubLlmClient` 补 token 打点、给 `MicrometerMetricsRecorder` 开启 histogram 或改 dashboard 查询用 `_max`/均值替代）。
+
+## 修复后复测
+
+本节补充整体分支审查后的修复轮（`LoadTestRunner` 轮询计时方法论修复 + Task 6 裁决后已完成的
+`StubLlmClient` 补打点/`MicrometerMetricsRecorder` 开 histogram）之后，真实重跑的数据。
+**上面「结果」「观察现象」「发现的问题」三节原样保留，不删除不改写**——它们记录的是第一轮暴露
+问题时的真实过程，本节是在此基础上的修正与补充。
+
+### 1. `LoadTestRunner` 的根因与修复
+
+第一轮报告里"延迟分布很窄（P50 到 P99 只差 0.1s），说明没有排队"这个结论**不成立**，根因是
+`LoadTestRunner.pollUntilDone` 的测量方法本身有缺陷，不是系统真的没有排队：
+
+- 轮询是**串行**的（单个 JDBC `Connection`，`for (TaskResult r : results) pollUntilDone(conn, r)`），
+  每个任务的 `finishedAt` 取的是"循环轮到它查询时"的 `Instant.now()`，不是它真正到达终态
+  （`AGGREGATING`/`FAILED`）的时刻。后面排队的任务可能早就跑完了，却被盖上"轮到它时"这个更晚的
+  时间戳——测出来的延迟序列实际上是"真实完成时刻的滚动最大值"，几乎没有真实离散度，是测量方法
+  造成的假象。
+- 顺带发现一个潜在 bug：如果某个任务的 deadline（`sentAt + 180s`）在"轮到它查询"时已经过期
+  （因为队列里前面的任务耗时太久），原来的 `while (Instant.now().isBefore(deadline))` 循环体
+  可能一次都不执行，`lastSeenStatus` 保持未设置，该任务会被误判成 `NOT_FOUND`，即使它实际上早就
+  成功了。
+
+修复：`pollUntilDone` 查询 `review_task` 表时已经 `select status, updated_at`，但 `updated_at`
+之前没被用上。确认过 `JdbcReviewTaskRepository.updateStatus`（状态切换时 `update review_task set
+status = :status, updated_at = now()`）——这一列在每次状态更新时都会被写入当前真实时间，所以改成
+查到终态时直接用数据库里的 `updated_at` 作为 `finishedAt`，不再用 `Instant.now()`。同时改成"先查
+一次当前状态，不管 deadline 是否已过期，只有查到确实还在进行中才进入轮询等待"，修掉上面那个误判
+`NOT_FOUND` 的 bug。
+
+`LoadTestRunner` 本身是手动运行工具，不参与 `mvn verify`，这次没有为其单独加单测（抽取出的查询
+逻辑和 JDBC `Connection`/`ResultSet` 耦合，为了加单测而拆接口的成本大于收益，按性价比判断不加）。
+
+### 2. 修复后的真实延迟分布
+
+修复代码后，用同样的 10 并发 × 30 任务 × `zlanbin/codemind-sandbox` PR #1 配置重跑了 4 轮（前两轮
+用于确认修复生效，后两轮兼做 Grafana 5 分钟窗口的流量喂入）。以下是最后一轮（第 4 轮，数据最完整、
+不受前序批次收尾影响）的真实数据：
+
+| 指标 | 数值 |
+|---|---|
+| 发送成功（HTTP 200） | 30 / 30 |
+| `review_task` 表核对 | 30 / 30，一致 |
+| 成功（AGGREGATING） | 30 |
+| 失败 / 超时 | 0 / 0 |
+| 延迟 P50 | 33.3s |
+| 延迟 P95 | 36.0s |
+| 延迟 P99 | 36.7s |
+| 延迟 min / max | 29.8s / 36.7s |
+| 吞吐（任务数/分钟） | 48.83 |
+
+P50 到 P99 相差 3.4s，min 到 max 相差 6.9s——**这才是修复测量方法后的真实离散度**，不再是第一轮
+报告里"P50 到 P99 只差 0.1s"那种被测量方法抹平的假象。四轮重跑里 P50 从 26.2s 逐步上升到 33.3s，
+符合本机同时跑了多轮压测、JVM/数据库连接池等资源在复测过程中持续承压的预期，不是异常。
+
+**纠正第一轮结论**：第一轮报告"延迟分布很窄，说明 10 并发、30 任务下没有相互显著排队"这一结论
+**不成立**——窄分布是`finishedAt` 被轮询顺序污染导致的测量假象，不代表系统本身没有排队现象。
+是否存在真实排队，需要后续如果要验证，应改为逐任务记录 DAG 节点级别的开始/结束时间戳（本次修复
+只解决了任务级 `finishedAt` 的测量问题，没有新增节点级埋点，这点和第一轮报告"局限"一节记录的
+缺口一致，仍未解决）。
+
+### 3. call_site 维度 token 用量分布（第一轮"无法报告"，本次补上）
+
+修复 `StubLlmClient` 打点缺口后（Task 6 裁决后修复，见 `task-6-fix-report.md`），本次复测期间
+`codemind_llm_tokens_total` 确认有真实数据，6 个 call_site 全覆盖，Prometheus 侧直接抓取
+`/actuator/prometheus` 核实：
+
+| call_site | prompt tokens | completion tokens | 调用次数（prompt/500） |
+|---|---|---|---|
+| CHANGE_MAP | 30000 | 12000 | 60 |
+| GLOBAL_REDUCE | 30000 | 12000 | 60 |
+| PERFORMANCE | 30000 | 12000 | 60 |
+| SECURITY | 30000 | 12000 | 60 |
+| STYLE | 30000 | 12000 | 60 |
+| TEST | 30000 | 12000 | 60 |
+
+（上表为累计第 1、2 轮复测后的快照；固定假值 prompt=500/completion=200 每次调用，6 个 call_site
+各 60 次调用，与两轮共 60 个压测任务吻合。后续又跑了第 3、4 轮，累计到复测结束时六个 call_site
+各自 prompt=120000/completion=48000（经 Grafana API 核实为 `sum`=84000/call_site，即
+120×700），与总调用量一致。）`FINDING_FILTER` 这第 7 个 call_site 本次复测期间未产生数据——
+符合预期，它只在 `FindingFilter` 判定发现相似重复 finding 时才会触发调用，不是每次评审都会走到，
+不属于 spec 3.3 要求的覆盖范围缺口。
+
+### 4. Grafana 两个面板：这次真的坐实了
+
+用 `curl -u admin:codemind http://127.0.0.1:3000/api/datasources/proxy/uid/PBFA97CFB590B2093/api/v1/query`
+（真实 datasource uid 现场查询 `GET /api/datasources` 确认，不是硬编码；该 uid 同时也用于本次修复
+第 3 条，替换了 dashboard JSON 里原来字面量 `"Prometheus"`）直接查询两个面板对应的 PromQL：
+
+- **Token 用量面板**（`sum by (call_site) (codemind_llm_tokens_total)`）：**坐实**。首次查询即返回
+  6 个 call_site 的非空非 NaN 数值（如 `{"call_site":"STYLE"},"value":[...,"63000"]`），因为这是
+  计数器累计值，不受时间窗口限制，不存在"没喂满窗口"的问题。
+- **DAG 节点耗时 P95 面板**（`histogram_quantile(0.95, sum by (le, node_type)
+  (rate(codemind_dag_node_duration_seconds_bucket[5m])))`）：**坐实，但过程中遇到一次时间窗口
+  陷阱，如实记录**。第一次尝试是在压测跑完后等待了 6 分钟才查询，结果 6 个 node_type 全部返回
+  `"NaN"`——诊断发现是因为等待的 6 分钟里服务没有新流量，`rate(...[5m])` 这个滑动窗口在查询
+  那一刻已经滑出了真实流量发生的区间，桶计数器在窗口内没有任何增量，`rate()` 算出 0，
+  `histogram_quantile` 对一个全零的桶分布取分位数产生 `0/0` 的不定式而返回 `NaN`——这不是
+  dashboard 配置问题，是本次验证自己等待时机没踩对。随后立刻补跑一轮压测、压测刚结束就查询
+  （在 5 分钟窗口仍覆盖真实流量时查），这次 6 个 node_type 全部返回真实数值（如
+  `REVIEW_CHUNK`=7.85s、`BUILD_CHANGE_MAP`=7.52s、`GLOBAL_REDUCE`=3.90s、`RECALL_RULES`=1.97s、
+  `PLAN_CHUNKS`=0.011s、`CHUNK_REDUCE`=0.005s），90 秒后再查一次仍然非空非 NaN，确认不是瞬时巧合。
+
+两个面板在 Grafana 后端 API 查询层面均已坐实非空数据。这次没有像第一轮那样"只验证了结构修复
+正确，没有真实流量喂满 5 分钟窗口"——而是先踩了一次"等太久、流量已滑出窗口"的坑，再纠正验证
+时机，拿到了真正的非空结果。
