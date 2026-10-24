@@ -98,7 +98,7 @@ class BuildChangeMapNodeTest {
 
     @Test
     void degradesWhenLlmFailsButKeepsDeterministicSignatures() throws Exception {
-        LlmClient failing = (system, user) -> {
+        LlmClient failing = (system, user, callSite) -> {
             throw new LlmException("端点 503");
         };
 
@@ -139,7 +139,7 @@ class BuildChangeMapNodeTest {
         }
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             this.lastUserPrompt = userPrompt;
             return response;
         }

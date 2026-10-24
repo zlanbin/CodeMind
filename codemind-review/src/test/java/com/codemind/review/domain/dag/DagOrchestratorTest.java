@@ -205,7 +205,7 @@ class DagOrchestratorTest {
         }
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             return response;
         }
     }

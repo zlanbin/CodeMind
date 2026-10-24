@@ -139,7 +139,7 @@ class GlobalReduceNodeTest {
 
     @Test
     void degradesWhenLlmOutputMalformed() throws Exception {
-        LlmClient garbage = (system, user) -> "我需要看到完整代码才能判断";
+        LlmClient garbage = (system, user, callSite) -> "我需要看到完整代码才能判断";
 
         GlobalReduceResult result = nodeWith(garbage, List.of("reduce-chunk-callee", "reduce-chunk-caller"))
                 .execute(contextWith(CALLEE_SUMMARY, CALLER_SUMMARY));
@@ -168,7 +168,7 @@ class GlobalReduceNodeTest {
         private String lastUserPrompt;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             this.lastUserPrompt = userPrompt;
             boolean calleeDeclaresLong = userPrompt.contains("submitRefund(long");
             boolean calleePreviouslyString = userPrompt.contains("submitRefund(String");

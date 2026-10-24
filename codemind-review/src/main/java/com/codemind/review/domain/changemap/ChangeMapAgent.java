@@ -72,7 +72,7 @@ public final class ChangeMapAgent {
         String lastError = null;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                String raw = llmClient.complete(SYSTEM_PROMPT, userPrompt);
+                String raw = llmClient.complete(SYSTEM_PROMPT, userPrompt, "CHANGE_MAP");
                 ChangeMap changeMap = parser.parse(raw, files, signatureChanges);
                 log.info("ChangeMap 构建完成：{} 个文件、{} 处签名变更、意图「{}」（尝试 {}/{}）",
                         files.size(), signatureChanges.size(), changeMap.intent(), attempt + 1, maxRetries + 1);

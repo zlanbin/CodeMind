@@ -21,7 +21,7 @@ public class SpringAiLlmClient implements LlmClient {
     }
 
     @Override
-    public String complete(String systemPrompt, String userPrompt) throws LlmException {
+    public String complete(String systemPrompt, String userPrompt, String callSite) throws LlmException {
         try {
             String content = chatClient.prompt()
                     .system(systemPrompt)

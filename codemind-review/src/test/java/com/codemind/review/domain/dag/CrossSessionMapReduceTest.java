@@ -289,7 +289,7 @@ class CrossSessionMapReduceTest {
         private volatile boolean breakGlobalReduce = false;
 
         @Override
-        public String complete(String systemPrompt, String userPrompt) {
+        public String complete(String systemPrompt, String userPrompt, String callSite) {
             prompts.add(userPrompt);
 
             if (userPrompt.contains("【各切片摘要】")) {
