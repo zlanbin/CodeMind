@@ -10,6 +10,21 @@ spring:
         server-addr: ${NACOS_ADDR:127.0.0.1:8848}
         username: ${NACOS_USERNAME:nacos}
         password: ${NACOS_PASSWORD:nacos}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:127.0.0.1}:${POSTGRES_PORT:5432}/${POSTGRES_DB:codemind}
+    username: ${POSTGRES_USER:codemind}
+    password: ${POSTGRES_PASSWORD:codemind}
+  flyway:
+    # 独立 schema 与独立迁移目录，与 review（public）、integration、memory 的历史互不扫描（同 M8 D13）
+    enabled: true
+    default-schema: rule
+    schemas: rule
+    locations: classpath:db/rule-migration
+    baseline-on-migrate: false
+
+codemind:
+  rule:
+    default-top-k: 5
 
 management:
   endpoints:
