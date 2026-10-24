@@ -59,6 +59,11 @@ public final class ReviewChunkNode implements Node {
         return nodeId;
     }
 
+    @Override
+    public String nodeType() {
+        return "REVIEW_CHUNK";
+    }
+
     @SuppressWarnings("unchecked")
     @Override
     public AgentReview execute(NodeContext context) {

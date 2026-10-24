@@ -44,6 +44,11 @@ public final class ChunkReduceNode implements Node {
     }
 
     @Override
+    public String nodeType() {
+        return "CHUNK_REDUCE";
+    }
+
+    @Override
     public ChunkReduceResult execute(NodeContext context) {
         List<AgentReview> reviews = new ArrayList<>();
         for (String sourceId : sourceNodeIds) {

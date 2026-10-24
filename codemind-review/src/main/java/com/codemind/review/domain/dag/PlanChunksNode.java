@@ -55,6 +55,11 @@ public class PlanChunksNode implements Node {
     }
 
     @Override
+    public String nodeType() {
+        return "PLAN_CHUNKS";
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     public List<ReviewChunk> execute(NodeContext context) throws Exception {
         String taskId = context.taskId();

@@ -36,4 +36,13 @@ public interface Node {
     default Integer retries() {
         return null;
     }
+
+    /**
+     * 节点类型标识，用于指标打点的 {@code node_type} 标签（ARCHITECTURE M12 可观测性）。
+     *
+     * <p>默认返回实现类的简单类名；各具体节点通常覆写为固定常量，避免类名重构导致指标标签漂移。
+     */
+    default String nodeType() {
+        return getClass().getSimpleName();
+    }
 }

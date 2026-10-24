@@ -9,9 +9,12 @@ import com.codemind.review.domain.chunk.SemanticChunker;
 import com.codemind.review.domain.chunk.TokenEstimator;
 import com.codemind.review.domain.dag.DagOrchestrator;
 import com.codemind.review.domain.dag.DagScheduler;
+import com.codemind.review.domain.dag.MetricsRecorder;
 import com.codemind.review.domain.dag.NodeRunRepository;
 import com.codemind.review.domain.rule.RuleRecallPort;
 import com.codemind.review.domain.task.ReviewTaskRepository;
+import com.codemind.review.infrastructure.metrics.MicrometerMetricsRecorder;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -49,10 +52,16 @@ public class ReviewDagConfig {
     }
 
     @Bean
+    public MetricsRecorder metricsRecorder(MeterRegistry meterRegistry) {
+        return new MicrometerMetricsRecorder(meterRegistry);
+    }
+
+    @Bean
     public DagScheduler dagScheduler(NodeRunRepository nodeRunRepository,
+                                     MetricsRecorder metricsRecorder,
                                      @Value("${codemind.dag.node-timeout:120s}") Duration nodeTimeout,
                                      @Value("${codemind.dag.node-retries:1}") int nodeRetries) {
-        return new DagScheduler(nodeRunRepository, nodeTimeout, nodeRetries);
+        return new DagScheduler(nodeRunRepository, metricsRecorder, nodeTimeout, nodeRetries);
     }
 
     @Bean

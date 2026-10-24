@@ -24,12 +24,14 @@ import static org.junit.jupiter.api.Assertions.*;
 class DagSchedulerTest {
 
     private InMemoryNodeRunRepository nodeRunRepo;
+    private FakeMetricsRecorder metricsRecorder;
     private DagScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         nodeRunRepo = new InMemoryNodeRunRepository();
-        scheduler = new DagScheduler(nodeRunRepo, Duration.ofSeconds(30), 2);
+        metricsRecorder = new FakeMetricsRecorder();
+        scheduler = new DagScheduler(nodeRunRepo, metricsRecorder, Duration.ofSeconds(30), 2);
     }
 
     @Test
@@ -224,6 +226,42 @@ class DagSchedulerTest {
         assertTrue(ex.getMessage().contains("循环依赖"));
     }
 
+    @Test
+    void recordsNodeExecutionMetricOnSuccess() throws Exception {
+        Node node = new TestNode("A", ctx -> "result-A");
+        DagDefinition dag = DagDefinition.builder()
+                .addNode(node)
+                .build();
+
+        scheduler.execute(dag, NodeContext.create("task-metrics-success"));
+
+        assertEquals(1, metricsRecorder.records.size());
+        MetricRecord record = metricsRecorder.records.get(0);
+        assertEquals(node.nodeType(), record.nodeType());
+        assertTrue(record.durationMillis() >= 0);
+        assertTrue(record.success());
+    }
+
+    @Test
+    void recordsFailureMetricOnEachRetryAttemptNotOnlyFinal() {
+        Node failingNode = new TestNode("Fail", ctx -> {
+            throw new RuntimeException("总是失败");
+        }, null, 2);
+
+        DagDefinition dag = DagDefinition.builder()
+                .addNode(failingNode)
+                .build();
+
+        assertThrows(DagExecutionException.class, () ->
+                scheduler.execute(dag, NodeContext.create("task-metrics-failure")));
+
+        List<MetricRecord> failures = metricsRecorder.records.stream()
+                .filter(r -> !r.success())
+                .toList();
+        assertEquals(3, failures.size()); // 初次 + 2 次重试，每次失败都要记
+        failures.forEach(r -> assertEquals(failingNode.nodeType(), r.nodeType()));
+    }
+
     // ---- 辅助类 ----
 
     private static class TestNode implements Node {
@@ -290,5 +328,18 @@ class DagSchedulerTest {
                     .filter(r -> r.taskId().equals(taskId) && r.isCompleted())
                     .toList();
         }
+    }
+
+    /** 记录 {@code recordNodeExecution} 收到的每次调用参数，供断言。 */
+    private static class FakeMetricsRecorder implements MetricsRecorder {
+        private final List<MetricRecord> records = new ArrayList<>();
+
+        @Override
+        public void recordNodeExecution(String nodeType, long durationMillis, boolean success) {
+            records.add(new MetricRecord(nodeType, durationMillis, success));
+        }
+    }
+
+    private record MetricRecord(String nodeType, long durationMillis, boolean success) {
     }
 }

@@ -50,7 +50,7 @@ class CrossSessionMapReduceTest {
     @BeforeEach
     void setUp() {
         nodeRuns = new InMemoryNodeRunRepository();
-        scheduler = new DagScheduler(nodeRuns, Duration.ofSeconds(20), 0);
+        scheduler = new DagScheduler(nodeRuns, (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(20), 0);
         llm = new ScriptedLlmClient();
         FindingJsonParser findingParser = new FindingJsonParser();
         ChunkSummaryJsonParser summaryParser = new ChunkSummaryJsonParser();

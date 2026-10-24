@@ -33,11 +33,14 @@ public final class DagScheduler {
     private static final Logger log = LoggerFactory.getLogger(DagScheduler.class);
 
     private final NodeRunRepository nodeRunRepository;
+    private final MetricsRecorder metricsRecorder;
     private final Duration defaultTimeout;
     private final int defaultRetries;
 
-    public DagScheduler(NodeRunRepository nodeRunRepository, Duration defaultTimeout, int defaultRetries) {
+    public DagScheduler(NodeRunRepository nodeRunRepository, MetricsRecorder metricsRecorder,
+                         Duration defaultTimeout, int defaultRetries) {
         this.nodeRunRepository = Objects.requireNonNull(nodeRunRepository, "nodeRunRepository");
+        this.metricsRecorder = Objects.requireNonNull(metricsRecorder, "metricsRecorder");
         this.defaultTimeout = Objects.requireNonNull(defaultTimeout, "defaultTimeout");
         this.defaultRetries = defaultRetries;
     }
@@ -179,18 +182,21 @@ public final class DagScheduler {
             NodeRun run = NodeRun.started(taskId, nodeId);
             nodeRunRepository.save(run);
 
+            long attemptStart = System.currentTimeMillis();
             try {
                 log.info("执行节点 {} (尝试 {}/{})", nodeId, attempt + 1, retries + 1);
                 Object result = executeWithTimeout(node, context, timeout);
                 NodeRun completed = run.complete(result);
                 nodeRunRepository.save(completed);
                 log.info("节点 {} 完成", nodeId);
+                metricsRecorder.recordNodeExecution(node.nodeType(), System.currentTimeMillis() - attemptStart, true);
                 return result;
             } catch (Exception e) {
                 lastException = e;
                 log.warn("节点 {} 执行失败 (尝试 {}/{}): {}", nodeId, attempt + 1, retries + 1, e.getMessage());
                 NodeRun failed = run.fail(e.getMessage());
                 nodeRunRepository.save(failed);
+                metricsRecorder.recordNodeExecution(node.nodeType(), System.currentTimeMillis() - attemptStart, false);
 
                 if (attempt < retries) {
                     try {

@@ -41,6 +41,11 @@ public final class RecallRulesNode implements Node {
     }
 
     @Override
+    public String nodeType() {
+        return "RECALL_RULES";
+    }
+
+    @Override
     public List<RecalledRule> execute(NodeContext context) {
         String query = buildQuery();
         try {

@@ -374,7 +374,8 @@ class ReviewExecutionServiceTest {
             agents.put(dim, new ReviewAgent(dim, llm, findingParser, summaryParser, 0));
         }
         DagScheduler scheduler =
-                new DagScheduler(new InMemoryNodeRunRepository(), Duration.ofSeconds(20), 0);
+                new DagScheduler(new InMemoryNodeRunRepository(),
+                        (nodeType, durationMillis, success) -> { }, Duration.ofSeconds(20), 0);
         DagOrchestrator orchestrator = new DagOrchestrator(scheduler, agents,
                 new GlobalReduceAgent(llm, findingParser, 0), tasks);
         return new ReviewExecutionService(scm, tasks, orchestrator,
