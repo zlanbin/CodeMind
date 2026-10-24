@@ -10,6 +10,7 @@ import com.codemind.review.domain.chunk.TokenEstimator;
 import com.codemind.review.domain.dag.DagOrchestrator;
 import com.codemind.review.domain.dag.DagScheduler;
 import com.codemind.review.domain.dag.NodeRunRepository;
+import com.codemind.review.domain.rule.RuleRecallPort;
 import com.codemind.review.domain.task.ReviewTaskRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -58,8 +59,9 @@ public class ReviewDagConfig {
     public DagOrchestrator dagOrchestrator(DagScheduler dagScheduler,
                                            Map<ReviewDimension, ReviewAgent> reviewAgents,
                                            GlobalReduceAgent globalReduceAgent,
-                                           ReviewTaskRepository taskRepository) {
-        return new DagOrchestrator(dagScheduler, reviewAgents, globalReduceAgent, taskRepository);
+                                           ReviewTaskRepository taskRepository,
+                                           RuleRecallPort ruleRecallPort) {
+        return new DagOrchestrator(dagScheduler, reviewAgents, globalReduceAgent, taskRepository, ruleRecallPort);
     }
 
     /**

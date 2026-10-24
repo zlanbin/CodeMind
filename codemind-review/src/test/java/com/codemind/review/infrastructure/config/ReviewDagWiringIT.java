@@ -74,6 +74,9 @@ class ReviewDagWiringIT {
     @Autowired
     private com.codemind.review.application.FingerprintRegistrationDispatcher fingerprintRegistrationDispatcher;
 
+    @Autowired
+    private com.codemind.review.domain.rule.RuleRecallPort ruleRecallPort;
+
     @Test
     void contextLoadsWithAllDagBeans() {
         assertNotNull(dagOrchestrator, "DagOrchestrator 应装配成 bean（M3~M6 一直只在测试里 new）");
@@ -113,6 +116,30 @@ class ReviewDagWiringIT {
         assertNotNull(reviewPublicationService, "发布回执服务应装配成 bean");
         assertNotNull(reviewPublishedListener, "ReviewPublished 消费者应装配成 bean");
         assertNotNull(publicationTestPublisher, "DomainEventPublisher 唯一候选应是测试替身而非真实 MQ 发布器");
+    }
+
+    /**
+     * M11：规则召回的 Feign 适配器应在真实容器里装配成功，且 DagOrchestrator 已接入该端口
+     * （不再是 M5~M10 遗留的 4 参构造器）。三个 @FeignClient（memory 两个 + rule 一个）都指向不同
+     * 服务名，不应重现 M10 的 FeignClientSpecification 冲突。
+     */
+    @Test
+    void contextLoadsWithRuleRecallBean() {
+        assertNotNull(ruleRecallPort, "RuleRecallPort 应装配成 bean（FeignRuleRecallAdapter）");
+    }
+
+    /**
+     * DagOrchestrator 必须真的接住 RuleRecallPort（而不只是容器里独立存在一个 bean 没人用）——
+     * 用反射读私有字段，因为 DagOrchestrator 没有为测试暴露 getter，字段非 null 就证明用的是
+     * 带 rulePort 的 5 参构造器，不是向后兼容的 4 参构造器（那样 fanOutReview 永远不会建
+     * RecallRulesNode，生产评审流程里规则条款功能形同摆设）。
+     */
+    @Test
+    void dagOrchestratorIsWiredWithRuleRecallPort() throws Exception {
+        java.lang.reflect.Field field = DagOrchestrator.class.getDeclaredField("rulePort");
+        field.setAccessible(true);
+        assertNotNull(field.get(dagOrchestrator),
+                "DagOrchestrator 的 rulePort 字段不应为 null——装配必须用带 RuleRecallPort 的构造器");
     }
 
     /**
