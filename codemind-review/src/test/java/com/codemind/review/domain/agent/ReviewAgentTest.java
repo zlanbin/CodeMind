@@ -114,4 +114,54 @@ class ReviewAgentTest {
         assertEquals(1, review.attempts(), "maxRetries=0 时只尝试一次");
         assertEquals(1, stub.calls);
     }
+
+    /** 捕获实际发给 LlmClient 的 userPrompt，供 M11 规则注入断言用。 */
+    private static final class CapturingLlmClient implements LlmClient {
+        String lastUserPrompt;
+
+        @Override
+        public String complete(String systemPrompt, String userPrompt) throws LlmException {
+            lastUserPrompt = userPrompt;
+            return VALID;
+        }
+    }
+
+    @Test
+    void nonEmptyRulesAreInjectedIntoPrompt() {
+        CapturingLlmClient capturing = new CapturingLlmClient();
+        ReviewAgent agent = new ReviewAgent(ReviewDimension.STYLE, capturing, new FindingJsonParser(), 2);
+        var rules = List.of(new com.codemind.review.domain.rule.RecalledRule(
+                "接口设计规范", "3.2.1 方法命名", "方法命名", "公开方法命名必须用名词加动词结构", 0.9));
+
+        agent.review(CHUNK, null, rules);
+
+        assertTrue(capturing.lastUserPrompt.contains("3.2.1 方法命名"));
+        assertTrue(capturing.lastUserPrompt.contains("接口设计规范"));
+    }
+
+    @Test
+    void emptyRulesDoNotAddRuleBlockToPrompt() {
+        CapturingLlmClient capturing = new CapturingLlmClient();
+        ReviewAgent agent = new ReviewAgent(ReviewDimension.STYLE, capturing, new FindingJsonParser(), 2);
+
+        agent.review(CHUNK, null, List.of());
+
+        assertFalse(capturing.lastUserPrompt.contains("团队规范条款"));
+    }
+
+    @Test
+    void existingNoArgOverloadStillWorksUnchanged() {
+        StubLlmClient stub = new StubLlmClient(VALID);
+        ReviewAgent agent = new ReviewAgent(ReviewDimension.STYLE, stub, new FindingJsonParser(), 2);
+
+        assertFalse(agent.review(CHUNK).degraded());
+    }
+
+    @Test
+    void existingChangeMapOverloadStillWorksUnchanged() {
+        StubLlmClient stub = new StubLlmClient(VALID);
+        ReviewAgent agent = new ReviewAgent(ReviewDimension.STYLE, stub, new FindingJsonParser(), 2);
+
+        assertFalse(agent.review(CHUNK, null).degraded());
+    }
 }

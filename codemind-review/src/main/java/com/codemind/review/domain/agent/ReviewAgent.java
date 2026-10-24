@@ -3,6 +3,7 @@ package com.codemind.review.domain.agent;
 import com.codemind.review.domain.changemap.ChangeMap;
 import com.codemind.review.domain.chunk.ReviewChunk;
 import com.codemind.review.domain.finding.Finding;
+import com.codemind.review.domain.rule.RecalledRule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -82,7 +83,7 @@ public final class ReviewAgent {
 
     /** 评审单个 chunk，不注入 ChangeMap（M4/M5 行为）。 */
     public AgentReview review(ReviewChunk chunk) {
-        return review(chunk, null);
+        return review(chunk, null, List.of());
     }
 
     /**
@@ -92,9 +93,19 @@ public final class ReviewAgent {
      * 已解析成功的 Findings 照常返回。
      */
     public AgentReview review(ReviewChunk chunk, ChangeMap changeMap) {
+        return review(chunk, changeMap, List.of());
+    }
+
+    /**
+     * 评审单个 chunk，注入全局变更地图与召回的团队规范条款（M11，ARCHITECTURE 5 RecallRules 节点）。
+     *
+     * <p>{@code rules} 为空时不在 prompt 里出现「团队规范条款」区块（保持 prompt 干净）。
+     */
+    public AgentReview review(ReviewChunk chunk, ChangeMap changeMap, List<RecalledRule> rules) {
         Objects.requireNonNull(chunk, "chunk");
-        String systemPrompt = buildSystemPrompt();
-        String userPrompt = buildUserPrompt(chunk, changeMap);
+        Objects.requireNonNull(rules, "rules");
+        String systemPrompt = buildSystemPrompt(rules);
+        String userPrompt = buildUserPrompt(chunk, changeMap, rules);
 
         String lastError = null;
         int attempts = 0;
@@ -133,7 +144,7 @@ public final class ReviewAgent {
         }
     }
 
-    private String buildSystemPrompt() {
+    private String buildSystemPrompt(List<RecalledRule> rules) {
         String dimensionGuide = switch (dimension) {
             case STYLE -> """
 
@@ -176,26 +187,38 @@ public final class ReviewAgent {
                     不要报告风格、安全、性能相关问题，只聚焦测试。
                     """;
         };
-        return BASE_SYSTEM_PROMPT + dimensionGuide;
+        String ruleInstruction = rules.isEmpty() ? "" : """
+
+                如果发现的问题违反了上方给出的团队规范条款，message 必须以『违反《文档标题》sectionPath：』开头。
+                """;
+        return BASE_SYSTEM_PROMPT + dimensionGuide + ruleInstruction;
     }
 
     public ReviewDimension dimension() {
         return dimension;
     }
 
-    private String buildUserPrompt(ReviewChunk chunk, ChangeMap changeMap) {
+    private String buildUserPrompt(ReviewChunk chunk, ChangeMap changeMap, List<RecalledRule> rules) {
         String changeMapBlock = changeMap == null ? "" : changeMap.renderForPrompt() + "\n";
+        String ruleBlock = rules.isEmpty() ? "" : "【团队规范条款】\n" + rules.stream()
+                .map(r -> "《%s》%s：%s".formatted(r.documentTitle(), r.sectionPath(), truncate(r.content(), 500)))
+                .collect(java.util.stream.Collectors.joining("\n")) + "\n\n";
         return """
-                %s请评审以下代码变更。注意你只看到整个 PR 的一个切片，别的切片由其他会话评审。
+                %s%s请评审以下代码变更。注意你只看到整个 PR 的一个切片，别的切片由其他会话评审。
                 涉及文件: %s
                 变更符号: %s
 
                 unified diff:
                 %s
                 """.formatted(
+                ruleBlock,
                 changeMapBlock,
                 String.join(", ", chunk.files()),
                 chunk.changedSymbols().isEmpty() ? "（无）" : String.join(", ", chunk.changedSymbols()),
                 chunk.diffContent());
+    }
+
+    private static String truncate(String text, int maxLength) {
+        return text.length() <= maxLength ? text : text.substring(0, maxLength) + "...";
     }
 }
