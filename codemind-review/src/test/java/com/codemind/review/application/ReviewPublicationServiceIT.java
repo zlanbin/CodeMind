@@ -6,6 +6,8 @@ import com.codemind.review.domain.publication.ReviewOutboxRepository;
 import com.codemind.review.domain.task.ReviewTask;
 import com.codemind.review.domain.task.ReviewTaskRepository;
 import com.codemind.review.domain.task.ReviewTaskStatus;
+import com.codemind.review.infrastructure.persistence.JdbcFingerprintRegistrationOutboxRepository;
+import com.codemind.review.infrastructure.persistence.JdbcLastReviewedHeadRepository;
 import com.codemind.review.infrastructure.persistence.JdbcReviewOutboxRepository;
 import com.codemind.review.infrastructure.persistence.JdbcReviewTaskRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -47,6 +49,7 @@ class ReviewPublicationServiceIT {
     @Configuration
     @EnableAutoConfiguration
     @Import({JdbcReviewTaskRepository.class, JdbcReviewOutboxRepository.class,
+            JdbcLastReviewedHeadRepository.class, JdbcFingerprintRegistrationOutboxRepository.class,
             ReviewCompletionService.class, ReviewPublicationService.class})
     static class Config { }
 

@@ -45,6 +45,8 @@ public class ReviewExecutionService {
     private final com.codemind.review.domain.report.ReportPolicy reportPolicy;
     private final ReviewMarkdownRenderer renderer;
     private final com.codemind.review.domain.finding.FindingFilter findingFilter;
+    private final com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository;
+    private final com.codemind.review.domain.finding.TaskFingerprintPort taskFingerprintPort;
     public ReviewExecutionService(ScmContentPort scmContentPort,
                                   ReviewTaskRepository taskRepository,
                                   DagOrchestrator orchestrator,
@@ -57,7 +59,9 @@ public class ReviewExecutionService {
                                   com.codemind.review.domain.report.ReviewReportBuilder reportBuilder,
                                   com.codemind.review.domain.report.ReportPolicy reportPolicy,
                                   ReviewMarkdownRenderer renderer,
-                                  com.codemind.review.domain.finding.FindingFilter findingFilter) {
+                                  com.codemind.review.domain.finding.FindingFilter findingFilter,
+                                  com.codemind.review.domain.task.LastReviewedHeadRepository lastReviewedHeadRepository,
+                                  com.codemind.review.domain.finding.TaskFingerprintPort taskFingerprintPort) {
         this.scmContentPort = Objects.requireNonNull(scmContentPort, "scmContentPort");
         this.taskRepository = Objects.requireNonNull(taskRepository, "taskRepository");
         this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator");
@@ -71,6 +75,8 @@ public class ReviewExecutionService {
         this.reportPolicy = Objects.requireNonNull(reportPolicy, "reportPolicy");
         this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.findingFilter = Objects.requireNonNull(findingFilter, "findingFilter");
+        this.lastReviewedHeadRepository = Objects.requireNonNull(lastReviewedHeadRepository, "lastReviewedHeadRepository");
+        this.taskFingerprintPort = Objects.requireNonNull(taskFingerprintPort, "taskFingerprintPort");
     }
 
     /**
@@ -111,7 +117,7 @@ public class ReviewExecutionService {
         }
 
         try {
-            String diffText = scmContentPort.fetchDiff(task.repo(), task.prNumber());
+            String diffText = resolveDiff(task);
             List<DiffFile> diffFiles = new DiffParser().parse(diffText);
             List<String> sourcePaths = sourcePathsOf(diffFiles);
             Map<String, String> newSources =
@@ -142,21 +148,57 @@ public class ReviewExecutionService {
                 result = orchestrator.executeCrossSessionReview(changeMapNode, planNode, task, context);
             }
             var filterOutcome = findingFilter.filter(task.repo(), result.allFindings());
-            var report = reportBuilder.build(filterOutcome.kept(), diffFiles,
-                    java.util.stream.Stream.concat(result.allDegradations().stream(),
-                            filterOutcome.degradations().stream()).toList(),
+            List<com.codemind.review.domain.finding.Finding> afterPublishedFilter = filterOutcome.kept();
+            List<String> publishedFilterDegradations = new java.util.ArrayList<>();
+            try {
+                java.util.Set<String> published = taskFingerprintPort.published(task.repo(), task.prNumber());
+                afterPublishedFilter = afterPublishedFilter.stream()
+                        .filter(f -> !published.contains(f.fingerprint())).toList();
+            } catch (com.codemind.review.domain.finding.TaskFingerprintException e) {
+                publishedFilterDegradations.add("已发布指纹查询失败，放行全部 Finding：" + e.getMessage());
+            }
+            var report = reportBuilder.build(afterPublishedFilter, diffFiles,
+                    java.util.stream.Stream.concat(
+                            java.util.stream.Stream.concat(result.allDegradations().stream(),
+                                    filterOutcome.degradations().stream()),
+                            publishedFilterDegradations.stream()).toList(),
                     reportPolicy);
             task.assignReport(report);
             var comments = report.inline().stream().map(comment ->
                     new com.codemind.common.event.ReviewCompleted.LineComment(comment.path(), comment.line(),
                             renderer.renderInline(comment))).toList();
+            List<String> fingerprints = afterPublishedFilter.stream()
+                    .map(com.codemind.review.domain.finding.Finding::fingerprint).distinct().toList();
             completion.register(com.codemind.common.event.ReviewCompleted.of(task.taskId(), task.repo(),
-                    task.prNumber(), task.headSha(), renderer.renderSummary(report), comments));
+                    task.prNumber(), task.headSha(), renderer.renderSummary(report), comments, fingerprints));
             return result;
         } catch (Exception e) {
             markFailed(task);
             throw new IllegalStateException("评审执行失败 taskId=" + taskId, e);
         }
+    }
+
+    /**
+     * 取 diff：有上一次成功发布的基准、且 base 未变时走增量 compare API（M10），否则回退到整份
+     * PR diff。compare status 非 {@code ahead}（如 rebase 后的 diverged）同样回退全量
+     * （{@code docs/plans/M10.md} D5/D9）。
+     */
+    private String resolveDiff(ReviewTask task) {
+        var last = lastReviewedHeadRepository.findFor(task.repo(), task.prNumber());
+        if (last.isPresent() && last.get().baseSha().equals(task.baseSha())) {
+            try {
+                var compare = scmContentPort.fetchCompareDiff(task.repo(), last.get().headSha(), task.headSha());
+                if (compare.isAhead()) {
+                    return compare.diffText();
+                }
+                log.info("compare status={} 非 ahead，回退全量 diff taskId={}", compare.status(), task.taskId());
+            } catch (com.codemind.review.domain.scm.ScmContentException e) {
+                // compare 调用本身失败（网络抖动等）是不确定场景，按计划的全局约束回退全量
+                // diff，不能让一次瞬时失败直接判任务 FAILED（M10 Final Review F3）。
+                log.warn("compare API 调用失败，回退全量 diff taskId={} error={}", task.taskId(), e.getMessage());
+            }
+        }
+        return scmContentPort.fetchDiff(task.repo(), task.prNumber());
     }
 
     /**

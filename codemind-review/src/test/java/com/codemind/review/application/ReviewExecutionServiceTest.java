@@ -41,6 +41,8 @@ class ReviewExecutionServiceTest {
     private final RecordingScmContentPort scm = new RecordingScmContentPort();
     private final StubTaskRepository tasks = new StubTaskRepository();
     private final ReviewOutboxDispatcherTest.MemoryOutbox requests = new ReviewOutboxDispatcherTest.MemoryOutbox();
+    private final StubLastReviewedHeadRepository lastReviewedHeads = new StubLastReviewedHeadRepository();
+    private final StubTaskFingerprintPort taskFingerprints = new StubTaskFingerprintPort();
 
     @Test
     void skipsJavaDeletedFilesWhenCollectingSourcePaths() {
@@ -220,6 +222,143 @@ class ReviewExecutionServiceTest {
         assertEquals(1, task.report().degradations().size(), "召回失败的降级说明要并入报告");
     }
 
+    @Test
+    void firstReviewUsesFullDiffWhenNoLastReviewedHead() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        lastReviewedHeads.found = Optional.empty();
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchDiffCalled, "没有历史基准，应走全量 diff");
+        assertFalse(scm.fetchCompareDiffCalled, "不该调用 compare API");
+    }
+
+    @Test
+    void secondPushUsesCompareDiffWhenBaseUnchanged() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareResult = new com.codemind.review.domain.scm.CompareResult("ahead", javaDiff());
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "base 未变，应走增量 compare API");
+        assertFalse(scm.fetchDiffCalled, "增量成功时不该再取全量 diff");
+        assertEquals("previous-head-sha", scm.comparedOldHead);
+        assertEquals(HEAD, scm.comparedNewHead);
+    }
+
+    @Test
+    void fallsBackToFullDiffWhenBaseShaChanged() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, "different-base-sha", "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchDiffCalled, "base 变了（rebase 场景）应回退全量 diff");
+        assertFalse(scm.fetchCompareDiffCalled, "base 不一致时不该调用 compare API");
+    }
+
+    @Test
+    void fallsBackToFullDiffWhenCompareStatusNotAhead() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareResult = new com.codemind.review.domain.scm.CompareResult("diverged", "");
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "应先尝试 compare API");
+        assertTrue(scm.fetchDiffCalled, "status 非 ahead 应回退全量 diff");
+    }
+
+    @Test
+    void fallsBackToFullDiffWhenCompareApiThrows() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.compareFailure = new ScmContentException("GitHub compare 瞬时失败", null);
+        lastReviewedHeads.found = Optional.of(new com.codemind.review.domain.task.LastReviewedHead(
+                REPO, 7, BASE, "previous-head-sha", java.time.Instant.now()));
+
+        service().executeReview(task.taskId());
+
+        assertTrue(scm.fetchCompareDiffCalled, "应先尝试 compare API");
+        assertTrue(scm.fetchDiffCalled, "compare API 瞬时失败不该让任务直接 FAILED，应回退全量 diff");
+        assertEquals(ReviewTaskStatus.AGGREGATING, task.status(), "回退成功后任务应正常推进，不是 FAILED");
+    }
+
+    @Test
+    void alreadyPublishedFingerprintIsFilteredOutAfterFindingFilter() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprint = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.CORRECTNESS, "int x = 1;");
+        taskFingerprints.published = Set.of(fingerprint);
+
+        service(passThroughFindingFilter(), new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(0, task.report().totalFindings(), "已发布过的指纹应被过滤，不该重复出现在报告里");
+    }
+
+    @Test
+    void findingFilteredByMemoryRejectionDoesNotReachPublishedFingerprintCheck() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprintA = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.CORRECTNESS, "int x = 1;");
+        // FindingFilter（M9b）判定过滤掉 CORRECTNESS 的 Finding A；已发布指纹集合不含 A 的指纹，
+        // 证明 A 是被第一道（否决记忆）拦住的，不是靠第二道（已发布指纹）
+        FindingFilter filtersCorrectnessOnly = new FindingFilter(
+                (project, query, topK, minScore) -> List.of(new RecalledMemory("某条否决规则", 0.8)),
+                (sys, user) -> user.contains("CORRECTNESS") ? "{\"filtered\": true}" : "{\"filtered\": false}", 0);
+        taskFingerprints.published = Set.of();
+
+        service(filtersCorrectnessOnly, new TwoFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "只剩 PERFORMANCE 的 Finding B");
+        assertNotEquals(fingerprintA, task.report().inline().isEmpty() ? null
+                : task.report().inline().get(0).merged().get(0).fingerprint());
+    }
+
+    @Test
+    void findingPassingMemoryFilterButMatchingPublishedFingerprintIsStillFiltered() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        String fingerprintB = com.codemind.review.domain.finding.Fingerprints.of(
+                "A.java", com.codemind.review.domain.finding.Category.PERFORMANCE, "performance snippet");
+        // FindingFilter 放行两条（召回不到任何候选）；已发布指纹集合只包含 B 的指纹，
+        // 证明 B 是被第二道（已发布指纹）单独拦住的
+        taskFingerprints.published = Set.of(fingerprintB);
+
+        service(passThroughFindingFilter(), new TwoFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "只剩 CORRECTNESS 的 Finding A");
+        var remaining = task.report().inline().get(0).merged().get(0);
+        assertEquals(com.codemind.review.domain.finding.Category.CORRECTNESS, remaining.category());
+    }
+
+    @Test
+    void publishedFingerprintQueryFailurePassesThroughFindings() throws Exception {
+        ReviewTask task = insertedTask();
+        scm.diff = javaDiff();
+        scm.sources = Map.of("A.java", "class A { void go() { int x = 1; } }");
+        taskFingerprints.failure =
+                new com.codemind.review.domain.finding.TaskFingerprintException("memory 不可达", null);
+
+        service(passThroughFindingFilter(), new OneFindingLlmClient()).executeReview(task.taskId());
+
+        assertEquals(1, task.report().totalFindings(), "查询失败要放行 Finding，不能压掉");
+        assertEquals(1, task.report().degradations().size(), "查询失败的降级说明要并入报告");
+    }
+
     // --- 装配 ---
 
     private ReviewExecutionService service() {
@@ -252,7 +391,7 @@ class ReviewExecutionServiceTest {
                         })),
                 new com.codemind.review.domain.report.ReviewReportBuilder(),
                 com.codemind.review.domain.report.ReportPolicy.defaults(), new ReviewMarkdownRenderer(),
-                findingFilter);
+                findingFilter, lastReviewedHeads, taskFingerprints);
     }
 
     /** 不召回任何候选，等价于「过滤器不生效」，让既有用例的断言不受影响。 */
@@ -292,9 +431,17 @@ class ReviewExecutionServiceTest {
         private List<String> requestedPaths;
         private String requestedRef;
         private ScmContentException failure;
+        private boolean fetchDiffCalled;
+        private boolean fetchCompareDiffCalled;
+        private String comparedOldHead;
+        private String comparedNewHead;
+        private com.codemind.review.domain.scm.CompareResult compareResult =
+                new com.codemind.review.domain.scm.CompareResult("ahead", "");
+        private ScmContentException compareFailure;
 
         @Override
         public String fetchDiff(String repo, int prNumber) {
+            fetchDiffCalled = true;
             if (failure != null) {
                 throw failure;
             }
@@ -306,6 +453,18 @@ class ReviewExecutionServiceTest {
             requestedRef = ref;
             requestedPaths = List.copyOf(paths);
             return sources;
+        }
+
+        @Override
+        public com.codemind.review.domain.scm.CompareResult fetchCompareDiff(
+                String repo, String oldHead, String newHead) {
+            fetchCompareDiffCalled = true;
+            comparedOldHead = oldHead;
+            comparedNewHead = newHead;
+            if (compareFailure != null) {
+                throw compareFailure;
+            }
+            return compareResult;
         }
     }
 
@@ -356,6 +515,40 @@ class ReviewExecutionServiceTest {
         @Override
         public void updateStatus(String taskId, ReviewTaskStatus status) {
             statusHistory.add(status);
+        }
+    }
+
+    private static final class StubLastReviewedHeadRepository
+            implements com.codemind.review.domain.task.LastReviewedHeadRepository {
+        private Optional<com.codemind.review.domain.task.LastReviewedHead> found = Optional.empty();
+
+        @Override
+        public Optional<com.codemind.review.domain.task.LastReviewedHead> findFor(String repo, int prNumber) {
+            return found;
+        }
+
+        @Override
+        public void upsert(String repo, int prNumber, String baseSha, String headSha) {
+            throw new UnsupportedOperationException("ReviewExecutionService 不调用 upsert，见 Task 6");
+        }
+    }
+
+    private static final class StubTaskFingerprintPort
+            implements com.codemind.review.domain.finding.TaskFingerprintPort {
+        private Set<String> published = Set.of();
+        private com.codemind.review.domain.finding.TaskFingerprintException failure;
+
+        @Override
+        public Set<String> published(String repo, int prNumber) {
+            if (failure != null) {
+                throw failure;
+            }
+            return published;
+        }
+
+        @Override
+        public void record(String repo, int prNumber, List<String> fingerprints) {
+            throw new UnsupportedOperationException("ReviewExecutionService 不调用 record，见 Task 5/6");
         }
     }
 
@@ -416,6 +609,45 @@ class ReviewExecutionServiceTest {
      * 像 {@link ScriptedLlmClient} 一样让链路跑完，但第一次切片评审调用产出 1 条真实 Finding，
      * 供 Task 4 的过滤用例验证 {@code FindingFilter} 真的在 {@code reportBuilder.build} 之前生效。
      */
+    /**
+     * 产出 2 条不同 Finding（A：CORRECTNESS NPE；B：PERFORMANCE），供 Task 7 验证
+     * {@code FindingFilter}（M9b）与已发布指纹过滤（M10）两道独立过滤互不干扰。
+     */
+    private static final class TwoFindingLlmClient implements LlmClient {
+        private boolean findingEmitted = false;
+
+        @Override
+        public String complete(String systemPrompt, String userPrompt) {
+            if (userPrompt.contains("【各切片摘要】")) {
+                return "{\"findings\": []}";
+            }
+            if (userPrompt.contains("方法签名变更（AST 提取")) {
+                return """
+                        {"intent": "测试变更", "modules": ["test"], "highRiskFiles": []}
+                        """;
+            }
+            if (!findingEmitted) {
+                findingEmitted = true;
+                return """
+                        {"findings": [
+                         {"file": "A.java", "line": 1, "severity": "BLOCKER",
+                          "category": "CORRECTNESS", "message": "可能空指针", "suggestion": "加判空",
+                          "codeSnippet": "int x = 1;"},
+                         {"file": "A.java", "line": 1, "severity": "MINOR",
+                          "category": "PERFORMANCE", "message": "可优化", "suggestion": "无需改动",
+                          "codeSnippet": "performance snippet"}],
+                         "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                     "risks": [], "crossChunkQuestions": []}}
+                        """;
+            }
+            return """
+                    {"findings": [],
+                     "summary": {"changedSymbols": ["A#go()"], "intent": "改了实现",
+                                 "risks": [], "crossChunkQuestions": []}}
+                    """;
+        }
+    }
+
     private static final class OneFindingLlmClient implements LlmClient {
         private boolean findingEmitted = false;
 

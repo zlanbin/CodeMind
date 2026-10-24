@@ -31,4 +31,17 @@ public interface ScmClient {
      * @throws ScmException 平台返回错误状态（含文件不存在）或网络失败
      */
     String fetchFileContent(String repo, String path, String ref);
+
+    /**
+     * 对比两次 commit，取两者之间的 diff（M10 增量评审）。
+     *
+     * <p>{@code status} 非 {@code ahead}（如 {@code diverged}）时不取 diff 文本，调用方应回退到
+     * {@link #fetchPullRequestDiff} 取整份 diff。
+     *
+     * @param repo    仓库全名，形如 owner/name
+     * @param oldHead 上一次已评审的 commit SHA
+     * @param newHead 本次评审的 commit SHA
+     * @throws ScmException 平台返回错误状态或网络失败
+     */
+    CompareResult fetchCompareDiff(String repo, String oldHead, String newHead);
 }

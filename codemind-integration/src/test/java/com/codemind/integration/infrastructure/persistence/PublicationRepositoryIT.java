@@ -160,7 +160,7 @@ class PublicationRepositoryIT {
         ReviewCompleted first = event("original summary");
         PublicationRecord registered = repository.register(first);
         ReviewCompleted replay = new ReviewCompleted("another-delivery", Instant.parse("2026-10-22T09:10:11Z"),
-                taskId, first.repo(), 7, first.headSha(), first.summaryBody(), first.comments());
+                taskId, first.repo(), 7, first.headSha(), first.summaryBody(), first.comments(), List.of());
         PublicationRecord repeated = repository.register(replay);
 
         assertThat(repeated).isEqualTo(registered);
@@ -185,17 +185,17 @@ class PublicationRepositoryIT {
         ReviewCompleted first = event("original summary");
         PublicationRecord saved = repository.register(first);
         List<ReviewCompleted> conflicts = List.of(
-                new ReviewCompleted("e2", first.occurredAt(), taskId, "other/repo", 7, "head", first.summaryBody(), first.comments()),
-                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 8, "head", first.summaryBody(), first.comments()),
-                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "other-head", first.summaryBody(), first.comments()),
+                new ReviewCompleted("e2", first.occurredAt(), taskId, "other/repo", 7, "head", first.summaryBody(), first.comments(), List.of()),
+                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 8, "head", first.summaryBody(), first.comments(), List.of()),
+                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "other-head", first.summaryBody(), first.comments(), List.of()),
                 event("different summary"),
-                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "head", first.summaryBody(), List.of()),
+                new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "head", first.summaryBody(), List.of(), List.of()),
                 new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "head", first.summaryBody(),
-                        List.of(new LineComment("Other.java", 3, "line comment 中文"))),
+                        List.of(new LineComment("Other.java", 3, "line comment 中文")), List.of()),
                 new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "head", first.summaryBody(),
-                        List.of(new LineComment("src/A.java", 4, "line comment 中文"))),
+                        List.of(new LineComment("src/A.java", 4, "line comment 中文")), List.of()),
                 new ReviewCompleted("e2", first.occurredAt(), taskId, first.repo(), 7, "head", first.summaryBody(),
-                        List.of(new LineComment("src/A.java", 3, "different comment"))));
+                        List.of(new LineComment("src/A.java", 3, "different comment")), List.of()));
         for (ReviewCompleted conflict : conflicts) {
             assertThatThrownBy(() -> repository.register(conflict)).isInstanceOf(IllegalStateException.class);
             assertThat(repository.findByTaskId(taskId)).contains(saved);
@@ -228,7 +228,7 @@ class PublicationRepositoryIT {
     void concurrentRegistrationsKeepExactlyOneOriginalEvent() throws Exception {
         ReviewCompleted first = event("summary");
         ReviewCompleted second = new ReviewCompleted("delivery-2", first.occurredAt().plusSeconds(1),
-                taskId, first.repo(), first.prNumber(), first.headSha(), first.summaryBody(), first.comments());
+                taskId, first.repo(), first.prNumber(), first.headSha(), first.summaryBody(), first.comments(), List.of());
         CyclicBarrier barrier = new CyclicBarrier(2);
         PublicationRepository one = newRepository();
         PublicationRepository two = newRepository();
@@ -427,7 +427,7 @@ class PublicationRepositoryIT {
     private ReviewCompleted event(String summary) {
         return new ReviewCompleted("delivery-1", Instant.parse("2026-10-21T12:13:14.123456789Z"), taskId,
                 "codemind/publication-it", 7, "head", summary,
-                List.of(new LineComment("src/A.java", 3, "line comment 中文")));
+                List.of(new LineComment("src/A.java", 3, "line comment 中文")), List.of());
     }
 
     private record AttemptOutcome(int backendPid, boolean started) {

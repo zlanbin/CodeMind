@@ -16,6 +16,10 @@ import java.util.UUID;
  * @param headSha     评审所针对的源分支 HEAD commit SHA
  * @param summaryBody 总结评论正文
  * @param comments    行级评论
+ * @param fingerprints 本次评审发布的 Finding 指纹（M10）。markPublished 时要登记到
+ *                     memory 的已发布指纹表，但那一步操作的是从数据库 rehydrate 出来的
+ *                     ReviewTask（没有 report），只有存进 outbox 的这份事件payload 能把
+ *                     指纹从「评审执行」带到「发布确认」，故放在事件里而不是 task 上。
  */
 public record ReviewCompleted(
         String eventId,
@@ -25,18 +29,27 @@ public record ReviewCompleted(
         int prNumber,
         String headSha,
         String summaryBody,
-        List<LineComment> comments
+        List<LineComment> comments,
+        List<String> fingerprints
 ) implements DomainEvent {
 
     public ReviewCompleted {
         comments = List.copyOf(Objects.requireNonNull(comments, "comments"));
+        fingerprints = List.copyOf(Objects.requireNonNull(fingerprints, "fingerprints"));
     }
 
-    /** 用当前时间和随机 eventId 创建事件。 */
+    /** 用当前时间和随机 eventId 创建事件，不带指纹。 */
     public static ReviewCompleted of(String taskId, String repo, int prNumber, String headSha,
                                      String summaryBody, List<LineComment> comments) {
+        return of(taskId, repo, prNumber, headSha, summaryBody, comments, List.of());
+    }
+
+    /** 用当前时间和随机 eventId 创建事件，带本次发布的 Finding 指纹（M10）。 */
+    public static ReviewCompleted of(String taskId, String repo, int prNumber, String headSha,
+                                     String summaryBody, List<LineComment> comments,
+                                     List<String> fingerprints) {
         return new ReviewCompleted(UUID.randomUUID().toString(), Instant.now(), taskId, repo,
-                prNumber, headSha, summaryBody, comments);
+                prNumber, headSha, summaryBody, comments, fingerprints);
     }
 
     /** 一条 GitHub 行级评论的公共表示，不耦合平台请求类型。 */

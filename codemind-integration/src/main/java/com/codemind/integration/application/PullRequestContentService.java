@@ -31,6 +31,13 @@ public class PullRequestContentService {
         return scmClient.fetchPullRequestDiff(repo, prNumber);
     }
 
+    /** 两次 commit 之间的增量 diff（M10）。拉不到就抛 {@link ScmException}。 */
+    public com.codemind.integration.application.port.CompareResult compareDiff(
+            String repo, String oldHead, String newHead) {
+        log.debug("拉取增量 diff repo={} oldHead={} newHead={}", repo, oldHead, newHead);
+        return scmClient.fetchCompareDiff(repo, oldHead, newHead);
+    }
+
     /**
      * 批量拉文件在 {@code ref} 上的内容。
      *

@@ -234,7 +234,8 @@ Checkpoint 序列化：节点结果以 `Object` 存取，用开了 default typin
 4. **全局归约**：只读 `ChangeMap` + 所有 ChunkSummary（**不读原始 diff 与源码**），回答跨 chunk 问题，
    发现跨文件问题，输出与 chunk 级同结构的 Finding（category 以 `CORRECTNESS` 为主），
    由编排器直接追加到任务级 Findings，不额外加 MergeFindings 节点；摘要过多时树形递归归约（留 M7，M6 只做一层）。
-5. **增量与续跑**：再次 push 只对新 diff 切片，旧摘要从任务记忆复用，Finding 按 fingerprint 去重；失败从 checkpoint 续跑。
+5. **增量与续跑**：再次 push 只对新 diff 切片跑完整 M6 DAG（M10 决定：最小改动优先，不读/不缓存旧摘要，
+   ChangeMap/ChunkSummary 跨 push 复用留后续里程碑）；Finding 按已发布 fingerprint 过滤去重；失败从 checkpoint 续跑。
 
 ### 6.3 Token 预算（单个子会话）
 
@@ -293,8 +294,9 @@ intent 取首个非空），并校验 `changedSymbols` 与 `intent` 非空；不
 | L3 开发者画像 | 常犯错误、偏好的评审风格 | PG | 长期 |
 
 M8 落地范围（计划 `docs/plans/M8.md`）：L2 写入 / 混合召回 / 归档 / 人工删除；L1 只落了**已发布指纹**
-（PG `memory.task_fingerprint`，按 `(repo, pr_number)`，M10 增量去重用）。ChangeMap / ChunkSummary 的跨 push 复用
-与 Redis 层留 M10，L3 未做。review 侧 RecallContext 接线与 Dedup & Filter 留 M9。
+（PG `memory.task_fingerprint`，按 `(repo, pr_number)`，M10 增量去重用）。review 侧 RecallContext 接线与
+Dedup & Filter 留 M9。M10 落地范围：增量 diff（GitHub compare API）+ 已发布指纹过滤，**不含**
+ChangeMap/ChunkSummary 的跨 push 复用与 Redis 层——增量评审仍对新 diff 跑完整 M6 DAG，L3 未做。
 
 存储：独立 schema `memory`（Flyway `db/memory-migration`，同 integration 做法）。L2 表 `memory.memory`：
 `(project, kind, content_hash)` 唯一，`kind ∈ {CONVENTION, REJECTED_PATTERN, COMMON_DEFECT}`，`status ∈ {ACTIVE, ARCHIVED}`，

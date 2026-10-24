@@ -5,26 +5,60 @@
 
 ## 当前状态
 
-- 当前里程碑：**M9b 已完成**（Dedup & Filter 过滤生效，ROADMAP M9 验证点达成）。M9（M9a+M9b）整体完成
-- 上次更新：2026-10-23
-- 分支：M8 已提交推送 `feat/m8-memory`（`3a26ee0`，**PR 未开**，需用户在网页开）；M9a + M9b 都在 `feat/m9-feedback`
-  （基于 `3a26ee0`），已提交到本地分支（`23df653` M9a、`45a5e7f`~`b634999` M9b 共 6 个 commit），**未推送**，
-  待用户说「代码提交」。`docs/plans/M9.md` 的 M9b 计划文本本身仍只在工作区未提交
+- 当前里程碑：**M10 已完成**（增量评审，ROADMAP M10 验证点「第二次 push 只评审新 diff，不重复发评论」
+  在真实 sandbox PR 上端到端验证通过）。M8/M9a/M9b 均已合并进 `master`
+- 上次更新：2026-10-24
+- 分支：`feat/m10-incremental-review`（基于 master `d58aba4`），8 个实现 commit + 1 个 Final Review 修复
+  commit（`10b8ce9`，已推送）。本次新增的验收 IT（`IncrementalReviewSandboxIT`）和 pom 排除规则**还未提交**，
+  待本会话 S8 收尾后随 commit 一起推送
 - 阻塞项：无
-- 未验证项：无（M9b 全量 `mvn verify` 带真实 key 0 跳过；真实 PR 端到端验收通过，见下）
+- 未验证项：无。全量 `mvn verify`（真实中间件 + 真实 LLM/GitHub key）0 skipped/0 errors；Task 8 真实
+  sandbox PR 端到端验收通过（见下）
 
 ## 下一个会话要做的事
 
-**先收尾提交**：M8 开 PR 合并；M9（M9a+M9b 共 7 个本地 commit）推送，等 M8 合并后再开 PR（否则 PR 会带上 M8 的改动）。
-M9 整体完成，下一个里程碑是 **M10 增量评审**（见 `docs/ROADMAP.md`）。
+**先收尾提交**：本会话新增的 `IncrementalReviewSandboxIT` + pom 排除规则还未提交，提交后把
+`feat/m10-incremental-review` 推送、开 PR 合并进 `master`。合并后下一个里程碑是 **M11 rule-service：
+规范文档 RAG**（见 `docs/ROADMAP.md`）。
 
-M9b 验证点（ROADMAP M9）：对某条意见 👎 后再提同类代码，该意见不再出现。要点：
-- review 新建 `MemoryRecallPort` + Feign 调 memory 的 `POST /internal/memories/recall`（`kind=REJECTED_PATTERN`），
-  插在 `ReviewExecutionService` 的 `reportBuilder.build` 之前（约 :140），用 LLM 判定 Finding 是否属于被否决的同类（D3 = A）
-- 召回的 `minScore` 默认 0 会带回无关记忆，M9b 要定阈值；memory 不可用时放行并记降级
-- 真实验收素材已在库里：sandbox 的两条否决记忆 `[SECURITY] 不要求对内部来源的 sku 做 null/empty 校验`、
-  `[PERFORMANCE] 允许单线程场景用普通 HashMap`。M9b 需要 `lan-bin` 再开一个含同类代码的 PR，看这两类意见不再出现，
-  而 CORRECTNESS（NPE）照常出现
+M10 做完了什么（ROADMAP M10 验证点：第二次 push 只评审新 diff，不重复发评论）：
+- `ScmClient`/`ScmContentPort` 加 `fetchCompareDiff(repo, oldHead, newHead) -> CompareResult`，
+  GitHub compare API 两段式调用（先查 status，`ahead` 才取 diff 文本）
+- 新表 `last_reviewed_head`（repo+pr_number 为主键）记录上一次成功发布的 base/head；
+  `ReviewExecutionService.resolveDiff` 按它决定走 compare 增量还是 `fetchDiff` 全量，
+  base 变化（rebase）、compare status 非 ahead、compare 调用本身失败都回退全量
+- 新表 `fingerprint_registration_outbox` + `FingerprintRegistrationDispatcher`：发布成功后把
+  本次 Finding 指纹登记到 memory 的 `task-fingerprints` 端点，下次评审用 `TaskFingerprintPort.published`
+  过滤已发布过的指纹（叠在 M9b 的记忆拒绝过滤之后）
+- **Final Review 修了一个关键设计坑（F1）**：指纹数据不能放在 `ReviewTask.report`（内存态，`markPublished`
+  操作的是数据库 rehydrate 出来的全新对象，report 永远是 null）。改成指纹跟着 `ReviewCompleted` 事件走——
+  事件本身就是存进 `review_publication_outbox` 的 JSON，`markPublished` 从那里读，不用新查询
+- 真实验收（Task 8）：在 `zlanbin/codemind-sandbox` PR #1 走了两轮真实发布——baseline（head `9950568`，
+  25 个 Finding/指纹，10 条行级评论）、increment（head `655b47e`，只对新 commit 的 diff 评审，5 个新指纹，
+  3 条行级评论）。GitHub API 独立核实：3 个 review 分别带 9/10/3 条评论，互不重复
+- 验收用的 IT 固定在 `codemind-review/src/test/java/.../application/IncrementalReviewSandboxIT.java`，
+  跟 `RealPullRequestPublishIT` 一样走 `-Pgithub-write` profile、prepare/publish 分阶段人工确认，
+  不在日常 `mvn verify` 里跑
+
+M10 可直接复用：
+- 增量 diff：`ScmContentPort.fetchCompareDiff(repo, oldHead, newHead) -> CompareResult(status, diffText)`，
+  `isAhead()` 判定能不能用增量；两侧（integration/review）各自定义同形 DTO，不跨模块共享
+- 判断走全量还是增量的决策树在 `ReviewExecutionService.resolveDiff`：无基准/base 变了/compare 非 ahead/
+  compare 调用异常，四种情况都回退全量 diff，只有「有基准 + base 相同 + compare 返回 ahead」才走增量
+- 指纹登记落地流程：`ReviewPublicationService.markPublished` 首次推进到 PUBLISHED 时，从 outbox 里
+  `ReviewCompleted` 事件的 `fingerprints()` 字段取指纹（不是 `task.report()`——那个字段只在同一次
+  `executeReview` 调用栈内有效，`markPublished` 操作的是数据库 rehydrate 出来的对象）
+- `FingerprintRegistrationDispatcher.dispatchDue()` 要手动触发或等 `@Scheduled`（默认 30s 一轮，
+  `codemind.fingerprint.dispatch-enabled=false` 可关）才会真的调 memory 的 `POST /internal/task-fingerprints`
+- 真实验收要同时拉起 `codemind-integration`（8081）和 `codemind-memory`（8083）两个独立服务，
+  Feign 走静态 URL 覆盖（`codemind.integration.url` / `codemind.memory.url`），不能只关 Nacos discovery——
+  关了 discovery 但没给静态 URL，Feign 会直接报「No servers available」
+
+清理状态（M10 新增，sandbox PR #1）：
+- review `5636551096`（baseline，10 条行级评论）、`5636711855`（increment，3 条行级评论），
+  都带 `codemind:test=github-write` 标记，可用 `SandboxReviewCleanup` 清理
+- `review_publication_outbox` 历史行曾因缺 `fingerprints` 字段在消息重放时触发反序列化 NPE，
+  已对所有历史行回填 `fingerprints: []`；新环境若看到同样报错先查这张表有没有漏填的行
 
 M9a 可直接复用：
 - 反馈轮询：`POST /internal/feedback/poll?repo=&prNumber=`（integration）；定时器 `CODEMIND_FEEDBACK_POLL_ENABLED`
@@ -36,7 +70,7 @@ M8 可直接复用：
   同内容再写 = 强化（importance 取大、刷新衰减起点、ARCHIVED 复活）
 - 召回：`POST /internal/memories/recall {project, query, topK?, kind?, minScore?}`，每条带 similarity / decay / score。
   **`minScore` 默认 0 会带回低分无关记忆**，M9 的 Dedup & Filter 要定阈值（建议先用真实反馈样本校准）
-- 指纹：`POST|GET /internal/task-fingerprints`（M10 增量去重）
+- 指纹：`POST|GET /internal/task-fingerprints`（M10 增量去重，已接线，见上 M10 小节）
 - review 侧还没有 memory 的 Feign 客户端，M9 新建；两侧 DTO 各自定义
 - Embedding 是本地特征哈希（只认字面重叠）。M9 若判定「同类代码」需要语义相似，可能得换真实 embedding 模型
 

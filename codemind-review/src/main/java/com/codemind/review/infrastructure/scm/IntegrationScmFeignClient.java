@@ -22,4 +22,9 @@ public interface IntegrationScmFeignClient {
 
     @PostMapping("/contents")
     FileContentsResponseDto contents(@RequestBody FileContentsRequestDto request);
+
+    @GetMapping("/compare-diff")
+    CompareDiffResponseDto compareDiff(@RequestParam("repo") String repo,
+                                       @RequestParam("oldHead") String oldHead,
+                                       @RequestParam("newHead") String newHead);
 }
