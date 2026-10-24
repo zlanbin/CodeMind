@@ -8,6 +8,7 @@ import com.codemind.rule.domain.rule.RuleDocumentChunker;
 import com.codemind.rule.domain.rule.RuleDocumentRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -16,6 +17,10 @@ import java.util.List;
 
 /**
  * 规范文档上传用例（M11）：切块 → embedding → 版本替换（旧 ACTIVE 转 ARCHIVED，新文档 ACTIVE）。
+ *
+ * <p>{@code @Transactional}：archive 旧版本、插入新文档、插入新切块三步必须整体成功或整体回滚
+ * （spec D7「整个过程在一个事务内完成」），否则中途失败会留下「一个 ACTIVE 版本都不剩」或
+ * 「ACTIVE 文档存在但零 chunk」的脏状态，召回静默返回空、规范条款整份消失且无人可知（S6 发现）。
  */
 public class RuleIngestionService {
 
@@ -39,6 +44,7 @@ public class RuleIngestionService {
         this.clock = clock;
     }
 
+    @Transactional
     public UploadOutcome upload(String project, String title, String content) {
         requireNonBlank(project, "project", MAX_PROJECT_LENGTH);
         requireNonBlank(title, "title", MAX_TITLE_LENGTH);
