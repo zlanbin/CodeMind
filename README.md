@@ -5,6 +5,10 @@ PR 提交后自动触发多 Agent 并行评审，按代码规范、安全、性�
 方案见 [docs/PLAN.md](docs/PLAN.md)，架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，进度见 [docs/PROGRESS.md](docs/PROGRESS.md)。
 全链路演示脚本见 [docs/demo/WALKTHROUGH.md](docs/demo/WALKTHROUGH.md)。
 
+部署后怎么用每个功能，查 [docs/自己看.md](docs/自己看.md)（按功能分章的参考手册，真实请求
+格式与常见坑）。给别人讲这个系统，用 [docs/别人看.md](docs/别人看.md)（场景价值 + 技术设计，
+不需要操作步骤）。
+
 ## 核心能力
 
 - **多 Agent 并行评审**：diff 解析 + AST 语义切片后，STYLE / SECURITY / PERFORMANCE / TEST
