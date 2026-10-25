@@ -62,6 +62,9 @@ codemind:
     batch-size: 50
     lease: 120s
     retry-delay: 60s
+    # 超过这个重试次数后停止重投（如 GitHub 422：token 是 PR 作者，永久性拒绝，重投无意义）。
+    # 60s 重投间隔下 20 次约 20 分钟放弃；放弃的记录 last_error 会标注原因，不会被静默丢弃。
+    max-attempts: 20
   recovery:
     # 默认关：开着会让所有 IT 的上下文里多一个定时任务扫库。真实运行与演示必须设为 true
     enabled: ${CODEMIND_RECOVERY_ENABLED:false}

@@ -19,8 +19,9 @@ public class PublicationSchedulingConfig {
             DomainEventPublisher publisher,
             @Value("${codemind.publication.batch-size:50}") int batchSize,
             @Value("${codemind.publication.lease:120s}") Duration lease,
-            @Value("${codemind.publication.retry-delay:60s}") Duration retryDelay) {
-        return new ReviewOutboxDispatcher(repository, publisher, Clock.systemUTC(), batchSize, lease, retryDelay);
+            @Value("${codemind.publication.retry-delay:60s}") Duration retryDelay,
+            @Value("${codemind.publication.max-attempts:20}") int maxAttempts) {
+        return new ReviewOutboxDispatcher(repository, publisher, Clock.systemUTC(), batchSize, lease, retryDelay, maxAttempts);
     }
 
     @Configuration

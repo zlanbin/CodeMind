@@ -72,12 +72,13 @@ public class JdbcReviewOutboxRepository implements ReviewOutboxRepository {
             List<OutboxDelivery> claimed = new ArrayList<>();
             for (OutboxEntry entry : entries) {
                 String token = UUID.randomUUID().toString();
+                int attempts = entry.attempts() + 1;
                 jdbc.sql("""
                         update review_publication_outbox set lease_token=:token,lease_until=:until,
                           attempts=attempts+1,updated_at=:now where task_id=:id
                         """).param("token", UUID.fromString(token)).param("until", Timestamp.from(now.plus(lease)))
                         .param("now", Timestamp.from(now)).param("id", UUID.fromString(entry.event().taskId())).update();
-                claimed.add(new OutboxDelivery(entry.event(), token));
+                claimed.add(new OutboxDelivery(entry.event(), token, attempts));
             }
             return List.copyOf(claimed);
         });
@@ -90,6 +91,17 @@ public class JdbcReviewOutboxRepository implements ReviewOutboxRepository {
                   last_error=:error,updated_at=now()
                 where task_id=:id and lease_token=:token and acknowledged_at is null
                 """).param("nextAt", Timestamp.from(nextAt)).param("error", error)
+                .param("id", UUID.fromString(taskId)).param("token", UUID.fromString(leaseToken)).update() > 0;
+    }
+
+    /** 超过最大重试次数后停止重投：置 acknowledged_at 让它退出待投递扫描，last_error 保留放弃原因以便排查。 */
+    @Override
+    public boolean abandon(String taskId, String leaseToken, Instant now, String error) {
+        return jdbc.sql("""
+                update review_publication_outbox set acknowledged_at=:now,lease_token=null,lease_until=null,
+                  last_error=:error,updated_at=:now
+                where task_id=:id and lease_token=:token and acknowledged_at is null
+                """).param("now", Timestamp.from(now)).param("error", error)
                 .param("id", UUID.fromString(taskId)).param("token", UUID.fromString(leaseToken)).update() > 0;
     }
 

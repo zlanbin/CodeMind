@@ -18,11 +18,12 @@ public class ReviewOutboxDispatcher {
     private final int batchSize;
     private final Duration lease;
     private final Duration retryDelay;
+    private final int maxAttempts;
 
     public ReviewOutboxDispatcher(ReviewOutboxRepository outbox, DomainEventPublisher publisher,
-                                 Clock clock, int batchSize, Duration lease, Duration retryDelay) {
+                                 Clock clock, int batchSize, Duration lease, Duration retryDelay, int maxAttempts) {
         if (batchSize <= 0 || lease.isNegative() || lease.isZero()
-                || retryDelay.isNegative() || retryDelay.isZero()) {
+                || retryDelay.isNegative() || retryDelay.isZero() || maxAttempts <= 0) {
             throw new IllegalArgumentException("投递批量及时间配置必须为正");
         }
         this.outbox = outbox;
@@ -31,6 +32,7 @@ public class ReviewOutboxDispatcher {
         this.batchSize = batchSize;
         this.lease = lease;
         this.retryDelay = retryDelay;
+        this.maxAttempts = maxAttempts;
     }
 
     public int dispatchDue() {
@@ -55,8 +57,17 @@ public class ReviewOutboxDispatcher {
             log.warn("评审完成请求投递失败 taskId={} error={}", delivery.event().taskId(), error);
         }
         try {
-            outbox.reschedule(delivery.event().taskId(), delivery.leaseToken(),
-                    clock.instant().plus(retryDelay), error);
+            if (delivery.attempts() >= maxAttempts) {
+                // 已达最大重试次数：多半是 integration 端永久性拒绝（如 422），再投无意义，
+                // 停止重投并记日志，避免这类请求无限占用 outbox 扫描与 MQ 消费资源。
+                String abandonReason = "max attempts (%d) reached, last error=%s".formatted(maxAttempts, error);
+                outbox.abandon(delivery.event().taskId(), delivery.leaseToken(), clock.instant(), abandonReason);
+                log.error("评审完成请求超过最大重试次数，停止重投 taskId={} attempts={} lastError={}",
+                        delivery.event().taskId(), delivery.attempts(), error);
+            } else {
+                outbox.reschedule(delivery.event().taskId(), delivery.leaseToken(),
+                        clock.instant().plus(retryDelay), error);
+            }
         } catch (RuntimeException e) {
             // 原领取租约仍在；到期后可重领，不能因一条请求挡住本批其它任务。
             log.warn("投递请求重排失败 taskId={} error={}", delivery.event().taskId(), e.getClass().getSimpleName());

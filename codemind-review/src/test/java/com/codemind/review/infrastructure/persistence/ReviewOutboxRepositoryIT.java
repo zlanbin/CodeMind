@@ -74,6 +74,28 @@ class ReviewOutboxRepositoryIT {
     }
 
     @Test
+    void abandonedRequestStopsBeingClaimedAndKeepsReasonInLastError() {
+        ReviewCompleted event = register();
+        Instant now = Instant.now().plusSeconds(1);
+        var delivery = outbox.claimTask(event.taskId(), now, Duration.ofSeconds(120)).orElseThrow();
+        assertTrue(outbox.abandon(event.taskId(), delivery.leaseToken(), now, "max attempts (20) reached"));
+        assertTrue(outbox.claimTask(event.taskId(), now.plusSeconds(1000), Duration.ofSeconds(120)).isEmpty());
+        assertTrue(outbox.claimDue(now.plusSeconds(1000), 50, Duration.ofSeconds(120)).isEmpty());
+        assertEquals("max attempts (20) reached", jdbc.sql("select last_error from review_publication_outbox where task_id=:id")
+                .param("id", UUID.fromString(event.taskId())).query(String.class).single());
+    }
+
+    @Test
+    void abandonWithStaleLeaseTokenFailsAndLeavesRequestClaimable() {
+        ReviewCompleted event = register();
+        Instant now = Instant.now().plusSeconds(1);
+        var first = outbox.claimTask(event.taskId(), now, Duration.ofSeconds(120)).orElseThrow();
+        var second = outbox.claimTask(event.taskId(), now.plusSeconds(121), Duration.ofSeconds(120)).orElseThrow();
+        assertFalse(outbox.abandon(event.taskId(), first.leaseToken(), now.plusSeconds(200), "stale"));
+        assertTrue(outbox.abandon(event.taskId(), second.leaseToken(), now.plusSeconds(200), "current"));
+    }
+
+    @Test
     void acknowledgedRequestCannotBeReopened() {
         ReviewCompleted event = register();
         Instant now = Instant.now().plusSeconds(1);

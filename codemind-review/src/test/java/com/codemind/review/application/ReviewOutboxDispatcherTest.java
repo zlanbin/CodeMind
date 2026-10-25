@@ -38,7 +38,7 @@ class ReviewOutboxDispatcherTest {
         var dispatcher = new ReviewOutboxDispatcher(outbox, event -> {
             if (event.eventId().equals(first.eventId())) throw new IllegalStateException("MQ unavailable");
             sent.add((ReviewCompleted) event);
-        }, Clock.fixed(now, ZoneOffset.UTC), 50, Duration.ofSeconds(120), Duration.ofSeconds(60));
+        }, Clock.fixed(now, ZoneOffset.UTC), 50, Duration.ofSeconds(120), Duration.ofSeconds(60), 20);
         assertEquals(2, dispatcher.dispatchDue());
         assertEquals(List.of(second), sent);
         assertEquals(2, outbox.reschedules);
@@ -57,19 +57,33 @@ class ReviewOutboxDispatcherTest {
     }
 
     @Test
+    void sendFailureAtMaxAttemptsAbandonsInsteadOfReschedulingAndStopsFutureClaims() {
+        ReviewCompleted event = event();
+        outbox.insert(event);
+        var dispatcher = new ReviewOutboxDispatcher(outbox, e -> { throw new IllegalStateException("MQ unavailable"); },
+                Clock.fixed(now, ZoneOffset.UTC), 50, Duration.ofSeconds(120), Duration.ofSeconds(60), 1);
+        assertEquals(1, dispatcher.dispatchDue());
+        assertEquals(0, outbox.reschedules);
+        assertEquals(1, outbox.abandons);
+        assertTrue(outbox.errors.get(event.taskId()).contains("max attempts"));
+        outbox.eligible = true;
+        assertEquals(0, dispatcher.dispatchDue());
+    }
+
+    @Test
     void acknowledgementDuringSendCannotBeReopenedByReschedule() {
         ReviewCompleted event = event();
         outbox.insert(event);
         var dispatcher = new ReviewOutboxDispatcher(outbox,
                 ignored -> outbox.acknowledge(event.taskId(), now), Clock.fixed(now, ZoneOffset.UTC),
-                50, Duration.ofSeconds(120), Duration.ofSeconds(60));
+                50, Duration.ofSeconds(120), Duration.ofSeconds(60), 20);
         assertEquals(1, dispatcher.dispatchDue());
         assertEquals(0, dispatcher.dispatchDue());
     }
 
     private ReviewOutboxDispatcher dispatcher() {
         return new ReviewOutboxDispatcher(outbox, e -> sent.add((ReviewCompleted) e),
-                Clock.fixed(now, ZoneOffset.UTC), 50, Duration.ofSeconds(120), Duration.ofSeconds(60));
+                Clock.fixed(now, ZoneOffset.UTC), 50, Duration.ofSeconds(120), Duration.ofSeconds(60), 20);
     }
 
     static ReviewCompleted event() {
@@ -80,30 +94,44 @@ class ReviewOutboxDispatcherTest {
         final Map<String, ReviewCompleted> events = new LinkedHashMap<>();
         final Set<String> acknowledged = new HashSet<>();
         final Map<String, String> errors = new HashMap<>();
+        final Map<String, Integer> attempts = new HashMap<>();
         boolean eligible = true;
         Instant next;
         int reschedules;
+        int abandons;
 
         public Optional<OutboxEntry> findByTaskId(String taskId) {
             ReviewCompleted event = events.get(taskId);
             return event == null ? Optional.empty() : Optional.of(new OutboxEntry(event,
-                    event.occurredAt(), event.occurredAt(), 0, acknowledged.contains(taskId) ? event.occurredAt() : null));
+                    event.occurredAt(), event.occurredAt(), attempts.getOrDefault(taskId, 0),
+                    acknowledged.contains(taskId) ? event.occurredAt() : null));
         }
         public void insert(ReviewCompleted event) { events.putIfAbsent(event.taskId(), event); }
         public List<OutboxDelivery> claimDue(Instant now, int limit, Duration lease) {
             if (!eligible) return List.of();
             eligible = false;
             return events.values().stream().filter(e -> !acknowledged.contains(e.taskId()))
-                    .limit(limit).map(e -> new OutboxDelivery(e, "lease")).toList();
+                    .limit(limit).map(e -> claimed(e)).toList();
         }
         public Optional<OutboxDelivery> claimTask(String taskId, Instant now, Duration lease) {
             return findByTaskId(taskId).filter(e -> e.acknowledgedAt() == null)
-                    .map(e -> new OutboxDelivery(e.event(), "lease"));
+                    .map(e -> claimed(e.event()));
+        }
+        private OutboxDelivery claimed(ReviewCompleted event) {
+            int next = attempts.merge(event.taskId(), 1, Integer::sum);
+            return new OutboxDelivery(event, "lease", next);
         }
         public boolean reschedule(String taskId, String token, Instant nextAt, String error) {
             reschedules++;
             if (acknowledged.contains(taskId)) return false;
             next = nextAt;
+            errors.put(taskId, error);
+            return true;
+        }
+        public boolean abandon(String taskId, String token, Instant now, String error) {
+            abandons++;
+            if (acknowledged.contains(taskId)) return false;
+            acknowledged.add(taskId);
             errors.put(taskId, error);
             return true;
         }

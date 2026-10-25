@@ -14,5 +14,6 @@ public interface ReviewOutboxRepository {
     List<OutboxDelivery> claimDue(Instant now, int limit, Duration lease);
     Optional<OutboxDelivery> claimTask(String taskId, Instant now, Duration lease);
     boolean reschedule(String taskId, String leaseToken, Instant nextAt, String error);
+    boolean abandon(String taskId, String leaseToken, Instant now, String error);
     void acknowledge(String taskId, Instant now);
 }

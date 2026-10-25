@@ -183,7 +183,7 @@ class ReviewExecutionServiceTest {
         scm.diff = javaDiff();
         service().executeReview(task.taskId());
         new ReviewOutboxDispatcher(requests, event -> { throw new IllegalStateException("unavailable"); },
-                java.time.Clock.systemUTC(), 50, Duration.ofSeconds(120), Duration.ofSeconds(60))
+                java.time.Clock.systemUTC(), 50, Duration.ofSeconds(120), Duration.ofSeconds(60), 20)
                 .dispatchTask(task.taskId());
         assertEquals(ReviewTaskStatus.AGGREGATING, task.status());
         assertFalse(tasks.statusHistory.contains(ReviewTaskStatus.FAILED));
